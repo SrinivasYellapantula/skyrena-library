@@ -1,0 +1,23 @@
+{
+  "id": "/library/",
+  "name": "Skyrena Community Library",
+  "short_name": "Skyrena Library",
+  "description": "Borrow and share books within the Hallmark Skyrena community.",
+  "start_url": "/library",
+  "scope": "/library/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#f5f0e6",
+  "theme_color": "#214b3e",
+  "orientation": "portrait-primary",
+  "categories": ["books", "education", "lifestyle"],
+  "icons": [
+    { "src": "/library/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/library/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/library/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Browse books", "short_name": "Browse", "url": "/library", "icons": [{ "src": "/library/icon-192.png", "sizes": "192x192" }] },
+    { "name": "My Library", "short_name": "My Library", "url": "/library/dashboard", "icons": [{ "src": "/library/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skyrena-library",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-29",
+  "assets": {
+    "directory": "./public"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "skyrena-community-library",
+      "database_id": "ca006c8d-18bf-4fdf-a3e8-89b3608362f4",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  }
+}
