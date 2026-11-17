@@ -406,13 +406,19 @@ async function join(request: Request, env: LibraryEnv) {
   } catch {
     return redirect(request, "/library/login?error=An+account+already+exists+for+this+mobile+number.");
   }
-  return redirect(request, "/library/login?success=Account+created.+An+administrator+will+verify+it+shortly.");
+  const params = new URLSearchParams({ success: "Account created. An administrator will verify it shortly.", notify: "1", name, home: `${block}-${flat}` });
+  return redirect(request, `/library/login?${params.toString()}`);
 }
 
 async function loginPage(request: Request, env: LibraryEnv) {
   const member = await sessionMember(request, env);
   if (member) return redirect(request, "/library/dashboard");
-  const body = `<main class="wrap"><section class="panel" style="max-width:560px;margin:auto"><div class="eyebrow">Resident access</div><h1>Library sign in</h1>${messageFrom(new URL(request.url))}<form method="post" action="/library/login" class="stack"><div class="field"><label>Mobile number</label><input name="mobile" required inputmode="numeric" pattern="[6-9][0-9]{9}" maxlength="10" autocomplete="username"></div><div class="field"><label>Library PIN</label><input name="pin" required type="password" inputmode="numeric" pattern="[0-9]{4,6}" maxlength="6" autocomplete="current-password"></div><button class="button">Sign in</button><a href="/library/join">New to the library? Create an account</a></form></section></main>`;
+  const url = new URL(request.url);
+  const notifyName = clean(url.searchParams.get("name"), 100), notifyHome = clean(url.searchParams.get("home"), 20);
+  const approvalNotice = url.searchParams.get("notify") === "1" && notifyName && notifyHome
+    ? `<div class="notice"><strong>Help the admin approve your account sooner</strong><p>Send the prepared registration message to the library admin on WhatsApp.</p><a class="button compact" target="_blank" rel="noopener" href="${esc(whatsappShareLink(`Hi, a new Skyrena Community Library registration needs approval.\n\nName: ${notifyName}\nFlat: ${notifyHome}\n\nPlease review it here:\n${new URL("/library/admin", request.url).toString()}`))}">Notify admin on WhatsApp</a></div>`
+    : "";
+  const body = `<main class="wrap"><section class="panel" style="max-width:560px;margin:auto"><div class="eyebrow">Resident access</div><h1>Library sign in</h1>${messageFrom(url)}${approvalNotice}<form method="post" action="/library/login" class="stack"><div class="field"><label>Mobile number</label><input name="mobile" required inputmode="numeric" pattern="[6-9][0-9]{9}" maxlength="10" autocomplete="username"></div><div class="field"><label>Library PIN</label><input name="pin" required type="password" inputmode="numeric" pattern="[0-9]{4,6}" maxlength="6" autocomplete="current-password"></div><button class="button">Sign in</button><a href="/library/join">New to the library? Create an account</a></form></section></main>`;
   return html(page("Sign in", body));
 }
 
@@ -468,6 +474,10 @@ function paginationNav(url: URL, parameter: string, current: number, hasNext: bo
 function whatsappLink(mobile: unknown, message: string) {
   const digits = String(mobile ?? "").replace(/\D/g, "");
   return `https://wa.me/91${digits}?text=${encodeURIComponent(message)}`;
+}
+
+function whatsappShareLink(message: string) {
+  return `https://wa.me/?text=${encodeURIComponent(message)}`;
 }
 
 async function dashboardPage(request: Request, env: LibraryEnv) {
