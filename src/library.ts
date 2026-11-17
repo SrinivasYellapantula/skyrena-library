@@ -17,7 +17,30 @@ const DASHBOARD_PAGE_SIZE = 10;
 const ADMIN_PAGE_SIZE = 20;
 const PIN_HASH_ITERATIONS = 100000; // Cloudflare Workers production maximum for PBKDF2.
 const ONLINE_SEARCH_LANGUAGES = new Set(["English", "Hindi", "Telugu"]);
-const CATALOGUE_GENRES = ["Fiction", "Romance", "Historical", "Regency", "Suspense & Thriller"] as const;
+const CATALOGUE_GENRES = [
+  "Fiction",
+  "Romance",
+  "Historical",
+  "Regency",
+  "Mystery & Crime",
+  "Suspense & Thriller",
+  "Science Fiction",
+  "Fantasy",
+  "Horror",
+  "Children",
+  "Young Adult",
+  "Comics & Graphic Novels",
+  "Poetry",
+  "Biography & Memoir",
+  "History",
+  "Mythology & Spirituality",
+  "Self-help",
+  "Business",
+  "Science & Technology",
+  "Regional Literature",
+  "Non-fiction",
+  "Other"
+] as const;
 const enc = new TextEncoder();
 const clean = (value: unknown, max = 160) => String(value ?? "").trim().replace(/\s+/g, " ").slice(0, max);
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
@@ -449,12 +472,13 @@ async function dashboardPage(request: Request, env: LibraryEnv) {
   const incomingPager = paginationNav(url, "incomingPage", incomingPage, hasNext(incomingResult), "incoming");
   const waitlistPager = paginationNav(url, "waitlistPage", waitlistPage, hasNext(waitlistResult), "incoming");
   const shelfPager = paginationNav(url, "shelfPage", shelfPage, hasNext(copiesResult), "shelf");
+  const genreDatalistOptions = CATALOGUE_GENRES.map(genre => `<option value="${esc(genre)}"></option>`).join("");
   const body = `<main class="wrap dashboard"><div class="eyebrow">Block ${esc(member.block_no)} · Flat ${esc(member.flat_no)}</div><h1>Welcome, ${esc(member.display_name)}</h1>${messageFrom(url)}${overdueNotice}<nav class="tabs dashboard-tabs" aria-label="My Library sections"><a href="#borrowed" data-tab="borrowed">Borrowed Books</a><a href="#requests" data-tab="requests">Books I Requested</a><a href="#incoming" data-tab="incoming">Requests for My Books</a><a href="#shelf" data-tab="shelf">Books I’m Sharing</a><a href="#add-books" data-tab="add-books">Add Books</a></nav>
   <section id="borrowed" class="section dashboard-pane"><h2 class="section-title">Books I’m Reading</h2><div class="book-grid">${borrowedCards}</div>${borrowedPager}</section>
   <section id="requests" class="section panel dashboard-pane"><h2 class="section-title">Books I Requested</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Status</th><th>Action</th></tr></thead><tbody>${requestRows}</tbody></table></div>${requestsPager}</section>
   <section id="incoming" class="section panel dashboard-pane"><h2 class="section-title">Requests to Borrow My Books</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Reader</th><th>Status</th><th>Action</th></tr></thead><tbody>${incomingRows}</tbody></table></div>${incomingPager}<h3 style="margin-top:28px">Interested readers waiting for my books</h3><p class="help">You decide who receives an available copy. Waiting residents cannot see one another’s details.</p><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Interested reader</th><th>Requested</th><th>Action</th></tr></thead><tbody>${waitlistRows}</tbody></table></div>${waitlistPager}</section>
   <section id="shelf" class="section panel dashboard-pane"><h2 class="section-title">Books I’m Sharing</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Status</th><th>Action</th></tr></thead><tbody>${copyRows}</tbody></table></div>${shelfPager}</section>
-  <section id="add-books" class="section panel dashboard-pane"><div class="eyebrow">Share your shelf</div><h2 class="section-title">Add one or more books</h2><p class="help">Search by ISBN, title or author to fill details automatically. Online suggestions are limited to English, Hindi and Telugu editions. You can correct any field before saving.</p><div id="book-message"></div><form id="books-form"><div id="book-rows"></div><div class="actions"><button type="button" class="button-secondary" id="add-row">+ Add another book</button><button class="button" id="save-books">Save books</button></div></form><datalist id="genres"><option>Fiction</option><option>Non-fiction</option><option>Children</option><option>Young Adult</option><option>Biography</option><option>History</option><option>Mythology & Spirituality</option><option>Self-help</option><option>Business</option><option>Science & Technology</option><option>Comics & Graphic Novels</option><option>Poetry</option><option>Regional Literature</option></datalist></section></main>`;
+  <section id="add-books" class="section panel dashboard-pane"><div class="eyebrow">Share your shelf</div><h2 class="section-title">Add one or more books</h2><p class="help">Search by ISBN, title or author to fill details automatically. Online suggestions are limited to English, Hindi and Telugu editions. You can correct any field before saving.</p><div id="book-message"></div><form id="books-form"><div id="book-rows"></div><div class="actions"><button type="button" class="button-secondary" id="add-row">+ Add another book</button><button class="button" id="save-books">Save books</button></div></form><datalist id="genres">${genreDatalistOptions}</datalist></section></main>`;
   const scriptV2 = `const dashboardTabs=[...document.querySelectorAll('.dashboard-tabs a')],dashboardPanes=[...document.querySelectorAll('.dashboard-pane')];function showDashboardTab(){const requested=location.hash.slice(1),active=dashboardPanes.some(pane=>pane.id===requested)?requested:'borrowed';dashboardPanes.forEach(pane=>pane.hidden=pane.id!==active);dashboardTabs.forEach(tab=>{const selected=tab.dataset.tab===active;tab.classList.toggle('active',selected);tab.setAttribute('aria-current',selected?'page':'false')})}addEventListener('hashchange',showDashboardTab);showDashboardTab();let rowCount=0;
 const rows=document.querySelector('#book-rows'),message=document.querySelector('#book-message');
 const languageOptions=['English','Hindi','Telugu'];
