@@ -55,6 +55,8 @@ The Worker root redirects to `/library`.
 - Mobile always uses compact cards and avoids horizontal scrolling.
 - Cards show cover, title, author, genre, language, availability, copy count and owner as `Name Block-Flat`.
 - Pagination limits the catalogue to 24 titles per page.
+- Resident dashboard lists are paginated at 10 records per page.
+- Administrator lists are paginated at 20 records per page.
 - A signed-in resident does not see their own copies in Browse Books.
 - A resident also does not see a title they currently have on loan.
 
@@ -133,6 +135,8 @@ Only one section is shown at a time on mobile to avoid an overwhelming screen.
 ### Cloudflare free-tier safeguards
 
 - Catalogue data is paginated and query results are bounded.
+- Shared books, requests, waitlists, loans, reminders and members all use bounded server-side pagination.
+- Page numbers are capped to prevent deliberately large offsets from causing excessive D1 reads.
 - Database indexes cover member, copy, request, loan and reservation lookups.
 - Catalogue statistics are maintained incrementally instead of repeatedly scanning all rows.
 - External metadata results are cached for 24 hours.

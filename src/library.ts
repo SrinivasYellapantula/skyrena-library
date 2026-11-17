@@ -13,6 +13,8 @@ const LOAN_DAYS = 14;
 const RESERVATION_HOURS = 48;
 const RESERVATION_EXTENSION_HOURS = 24;
 const CATALOGUE_PAGE_SIZE = 24;
+const DASHBOARD_PAGE_SIZE = 10;
+const ADMIN_PAGE_SIZE = 20;
 const PIN_HASH_ITERATIONS = 100000; // Cloudflare Workers production maximum for PBKDF2.
 const ONLINE_SEARCH_LANGUAGES = new Set(["English", "Hindi", "Telugu"]);
 const CATALOGUE_GENRES = ["Fiction", "Romance", "Historical", "Regency", "Suspense & Thriller"] as const;
@@ -351,6 +353,24 @@ function requestStatus(value: unknown) {
   return ({ pending: "Requested", waitlisted: "Waiting list", approved: "Reserved", fulfilled: "Borrowed", declined: "Declined", cancelled: "Cancelled" } as Record<string, string>)[status] || status;
 }
 
+function requestedPage(url: URL, parameter: string) {
+  const value = Number.parseInt(url.searchParams.get(parameter) || "1", 10);
+  return Number.isFinite(value) ? Math.min(100, Math.max(1, value)) : 1;
+}
+
+function paginationNav(url: URL, parameter: string, current: number, hasNext: boolean, anchor: string) {
+  if (current === 1 && !hasNext) return "";
+  const href = (page: number) => {
+    const params = new URLSearchParams(url.searchParams);
+    params.delete("success");
+    params.delete("error");
+    if (page <= 1) params.delete(parameter); else params.set(parameter, String(page));
+    const query = params.toString();
+    return `${url.pathname}${query ? `?${query}` : ""}${anchor ? `#${anchor}` : ""}`;
+  };
+  return `<nav class="pagination" aria-label="More results">${current > 1 ? `<a class="button-secondary compact" href="${esc(href(current - 1))}">Previous</a>` : ""}<span class="current">Page ${current}</span>${hasNext ? `<a class="button-secondary compact" href="${esc(href(current + 1))}">Next</a>` : ""}</nav>`;
+}
+
 function whatsappLink(mobile: unknown, message: string) {
   const digits = String(mobile ?? "").replace(/\D/g, "");
   return `https://wa.me/91${digits}?text=${encodeURIComponent(message)}`;
@@ -364,18 +384,21 @@ async function dashboardPage(request: Request, env: LibraryEnv) {
     const body = `<main class="wrap"><section class="panel" style="max-width:760px;margin:auto"><div class="eyebrow">Membership verification</div><h1>Welcome, ${esc(member.display_name)}</h1>${messageFrom(url)}<div class="notice">Your account is awaiting administrator verification. Once approved, you can add books and place borrowing requests.</div><p class="member-line">Block ${esc(member.block_no)} · Flat ${esc(member.flat_no)} · ${esc(member.mobile_number)}</p><a class="button-secondary" href="/library">Browse the catalogue</a></section></main>`;
     return html(page("My library", body, member));
   }
-  const [copiesResult, incomingResult, waitlistResult, requestsResult, borrowedResult] = await env.DB.batch([
+  const shelfPage = requestedPage(url, "shelfPage"), incomingPage = requestedPage(url, "incomingPage");
+  const waitlistPage = requestedPage(url, "waitlistPage"), requestsPage = requestedPage(url, "requestsPage");
+  const borrowedPage = requestedPage(url, "borrowedPage"), pageLimit = DASHBOARD_PAGE_SIZE + 1;
+  const [copiesResult, incomingResult, waitlistResult, requestsResult, borrowedResult, overdueResult] = await env.DB.batch([
     env.DB.prepare(`SELECT c.id,c.status,c.condition_label,c.notes,t.title,t.author,t.cover_url,
       l.due_at,b.display_name borrower_name,b.block_no borrower_block,b.flat_no borrower_flat,b.mobile_number borrower_mobile
       FROM library_copies c JOIN library_titles t ON t.id=c.title_id
       LEFT JOIN library_loans l ON l.copy_id=c.id AND l.status='active'
       LEFT JOIN library_members b ON b.id=l.borrower_member_id
-      WHERE c.owner_member_id=? AND c.withdrawn_at IS NULL ORDER BY c.created_at DESC`).bind(member.id),
+      WHERE c.owner_member_id=? AND c.withdrawn_at IS NULL ORDER BY c.created_at DESC LIMIT ? OFFSET ?`).bind(member.id, pageLimit, (shelfPage - 1) * DASHBOARD_PAGE_SIZE),
     env.DB.prepare(`SELECT r.id,r.status,r.created_at,r.reservation_expires_at,r.reservation_extensions,t.title,c.id copy_id,
       m.display_name requester_name,m.block_no requester_block,m.flat_no requester_flat,m.mobile_number requester_mobile
       FROM library_requests r JOIN library_titles t ON t.id=r.title_id
       JOIN library_copies c ON c.id=r.copy_id JOIN library_members m ON m.id=r.requester_member_id
-      WHERE c.owner_member_id=? AND r.status IN ('pending','approved') ORDER BY r.created_at`).bind(member.id),
+      WHERE c.owner_member_id=? AND r.status IN ('pending','approved') ORDER BY r.created_at LIMIT ? OFFSET ?`).bind(member.id, pageLimit, (incomingPage - 1) * DASHBOARD_PAGE_SIZE),
     env.DB.prepare(`SELECT r.id,r.created_at,r.title_id,t.title,
       m.display_name requester_name,m.block_no requester_block,m.flat_no requester_flat,m.mobile_number requester_mobile,
       (SELECT c.id FROM library_copies c WHERE c.title_id=r.title_id AND c.owner_member_id=?
@@ -384,21 +407,21 @@ async function dashboardPage(request: Request, env: LibraryEnv) {
       JOIN library_members m ON m.id=r.requester_member_id
       WHERE r.status='waitlisted' AND EXISTS (SELECT 1 FROM library_copies owned
         WHERE owned.title_id=r.title_id AND owned.owner_member_id=? AND owned.withdrawn_at IS NULL)
-      ORDER BY t.title COLLATE NOCASE,r.created_at LIMIT 100`).bind(member.id, member.id),
+      ORDER BY t.title COLLATE NOCASE,r.created_at LIMIT ? OFFSET ?`).bind(member.id, member.id, pageLimit, (waitlistPage - 1) * DASHBOARD_PAGE_SIZE),
     env.DB.prepare(`SELECT r.id,r.status,r.created_at,r.reservation_expires_at,t.title,t.author
       FROM library_requests r JOIN library_titles t ON t.id=r.title_id
       WHERE r.requester_member_id=? AND (r.status IN ('pending','waitlisted','approved') OR (r.status='fulfilled' AND EXISTS (SELECT 1 FROM library_loans l WHERE l.request_id=r.id AND l.status='active')))
-      ORDER BY r.created_at DESC LIMIT 50`).bind(member.id),
+      ORDER BY r.created_at DESC LIMIT ? OFFSET ?`).bind(member.id, pageLimit, (requestsPage - 1) * DASHBOARD_PAGE_SIZE),
     env.DB.prepare(`SELECT l.id,l.due_at,l.borrowed_at,t.title,t.author,o.display_name owner_name,o.block_no owner_block,o.flat_no owner_flat,o.mobile_number owner_mobile
       FROM library_loans l JOIN library_copies c ON c.id=l.copy_id JOIN library_titles t ON t.id=c.title_id
-      JOIN library_members o ON o.id=l.owner_member_id WHERE l.borrower_member_id=? AND l.status='active' ORDER BY l.due_at`).bind(member.id)
+      JOIN library_members o ON o.id=l.owner_member_id WHERE l.borrower_member_id=? AND l.status='active' ORDER BY l.due_at LIMIT ? OFFSET ?`).bind(member.id, pageLimit, (borrowedPage - 1) * DASHBOARD_PAGE_SIZE),
+    env.DB.prepare("SELECT COUNT(*) count FROM library_loans WHERE borrower_member_id=? AND status='active' AND due_at<CURRENT_TIMESTAMP").bind(member.id)
   ]);
-  const copies = copiesResult.results as Array<Record<string, unknown>>;
-  const incoming = incomingResult.results as Array<Record<string, unknown>>;
-  const waitlist = waitlistResult.results as Array<Record<string, unknown>>;
-  const requests = requestsResult.results as Array<Record<string, unknown>>;
-  const borrowed = borrowedResult.results as Array<Record<string, unknown>>;
-  const overdueBorrowed = borrowed.filter(loan => loanTiming(loan.due_at).key === "overdue");
+  const limited = (result: D1Result<unknown>) => (result.results as Array<Record<string, unknown>>).slice(0, DASHBOARD_PAGE_SIZE);
+  const hasNext = (result: D1Result<unknown>) => result.results.length > DASHBOARD_PAGE_SIZE;
+  const copies = limited(copiesResult), incoming = limited(incomingResult), waitlist = limited(waitlistResult);
+  const requests = limited(requestsResult), borrowed = limited(borrowedResult);
+  const overdueCount = Number((overdueResult.results[0] as Record<string, unknown> | undefined)?.count || 0);
   const copyRows = copies.map(copy => {
     const overdue = copy.due_at && new Date(String(copy.due_at).replace(" ", "T") + "Z").getTime() < Date.now();
     const loanInfo = copy.borrower_name ? `<div class="help">With ${esc(copy.borrower_name)} · ${esc(copy.borrower_block)}-${esc(copy.borrower_flat)} · due ${formatDate(copy.due_at)} ${overdue ? '<span class="badge overdue">Overdue</span>' : ""}</div>` : "";
@@ -420,12 +443,17 @@ async function dashboardPage(request: Request, env: LibraryEnv) {
     const personalReminder = `Return reminder: “${loan.title}” by ${loan.author} is due on ${formatDate(loan.due_at)}. Please return it to ${loan.owner_name}, ${loan.owner_block}-${loan.owner_flat}.`;
     return `<div class="card panel"><span class="badge ${overdue ? "overdue" : "borrowed"}">${esc(timing.label)}</span><h3>${esc(loan.title)}</h3><div class="meta">${esc(loan.author)}</div><p><strong>Return by ${formatDate(loan.due_at)}</strong></p><div class="help">Owner: ${esc(loan.owner_name)} · Block ${esc(loan.owner_block)} · Flat ${esc(loan.owner_flat)}</div><div class="actions"><a class="button-secondary compact" target="_blank" rel="noopener" href="${whatsappLink(loan.owner_mobile, `Hi ${loan.owner_name}, I am contacting you about returning ${loan.title}.`)}">Contact owner</a><a class="button compact" target="_blank" rel="noopener" href="${whatsappLink(member.mobile_number, personalReminder)}">Remind me on WhatsApp</a></div></div>`;
   }).join("") || `<div class="panel empty">No books currently borrowed.</div>`;
-  const overdueNotice = overdueBorrowed.length ? `<div class="notice error"><strong>${overdueBorrowed.length === 1 ? "A borrowed book is overdue." : `${overdueBorrowed.length} borrowed books are overdue.`}</strong> Please return ${overdueBorrowed.length === 1 ? "it" : "them"} as soon as possible, or contact the owner if you need assistance.</div>` : "";
+  const overdueNotice = overdueCount ? `<div class="notice error"><strong>${overdueCount === 1 ? "A borrowed book is overdue." : `${overdueCount} borrowed books are overdue.`}</strong> Please return ${overdueCount === 1 ? "it" : "them"} as soon as possible, or contact the owner if you need assistance.</div>` : "";
+  const borrowedPager = paginationNav(url, "borrowedPage", borrowedPage, hasNext(borrowedResult), "borrowed");
+  const requestsPager = paginationNav(url, "requestsPage", requestsPage, hasNext(requestsResult), "requests");
+  const incomingPager = paginationNav(url, "incomingPage", incomingPage, hasNext(incomingResult), "incoming");
+  const waitlistPager = paginationNav(url, "waitlistPage", waitlistPage, hasNext(waitlistResult), "incoming");
+  const shelfPager = paginationNav(url, "shelfPage", shelfPage, hasNext(copiesResult), "shelf");
   const body = `<main class="wrap dashboard"><div class="eyebrow">Block ${esc(member.block_no)} · Flat ${esc(member.flat_no)}</div><h1>Welcome, ${esc(member.display_name)}</h1>${messageFrom(url)}${overdueNotice}<nav class="tabs dashboard-tabs" aria-label="My Library sections"><a href="#borrowed" data-tab="borrowed">Borrowed Books</a><a href="#requests" data-tab="requests">Books I Requested</a><a href="#incoming" data-tab="incoming">Requests for My Books</a><a href="#shelf" data-tab="shelf">Books I’m Sharing</a><a href="#add-books" data-tab="add-books">Add Books</a></nav>
-  <section id="borrowed" class="section dashboard-pane"><h2 class="section-title">Books I’m Reading</h2><div class="book-grid">${borrowedCards}</div></section>
-  <section id="requests" class="section panel dashboard-pane"><h2 class="section-title">Books I Requested</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Status</th><th>Action</th></tr></thead><tbody>${requestRows}</tbody></table></div></section>
-  <section id="incoming" class="section panel dashboard-pane"><h2 class="section-title">Requests to Borrow My Books</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Reader</th><th>Status</th><th>Action</th></tr></thead><tbody>${incomingRows}</tbody></table></div><h3 style="margin-top:28px">Interested readers waiting for my books</h3><p class="help">You decide who receives an available copy. Waiting residents cannot see one another’s details.</p><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Interested reader</th><th>Requested</th><th>Action</th></tr></thead><tbody>${waitlistRows}</tbody></table></div></section>
-  <section id="shelf" class="section panel dashboard-pane"><h2 class="section-title">Books I’m Sharing</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Status</th><th>Action</th></tr></thead><tbody>${copyRows}</tbody></table></div></section>
+  <section id="borrowed" class="section dashboard-pane"><h2 class="section-title">Books I’m Reading</h2><div class="book-grid">${borrowedCards}</div>${borrowedPager}</section>
+  <section id="requests" class="section panel dashboard-pane"><h2 class="section-title">Books I Requested</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Status</th><th>Action</th></tr></thead><tbody>${requestRows}</tbody></table></div>${requestsPager}</section>
+  <section id="incoming" class="section panel dashboard-pane"><h2 class="section-title">Requests to Borrow My Books</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Reader</th><th>Status</th><th>Action</th></tr></thead><tbody>${incomingRows}</tbody></table></div>${incomingPager}<h3 style="margin-top:28px">Interested readers waiting for my books</h3><p class="help">You decide who receives an available copy. Waiting residents cannot see one another’s details.</p><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Interested reader</th><th>Requested</th><th>Action</th></tr></thead><tbody>${waitlistRows}</tbody></table></div>${waitlistPager}</section>
+  <section id="shelf" class="section panel dashboard-pane"><h2 class="section-title">Books I’m Sharing</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Status</th><th>Action</th></tr></thead><tbody>${copyRows}</tbody></table></div>${shelfPager}</section>
   <section id="add-books" class="section panel dashboard-pane"><div class="eyebrow">Share your shelf</div><h2 class="section-title">Add one or more books</h2><p class="help">Search by ISBN, title or author to fill details automatically. Online suggestions are limited to English, Hindi and Telugu editions. You can correct any field before saving.</p><div id="book-message"></div><form id="books-form"><div id="book-rows"></div><div class="actions"><button type="button" class="button-secondary" id="add-row">+ Add another book</button><button class="button" id="save-books">Save books</button></div></form><datalist id="genres"><option>Fiction</option><option>Non-fiction</option><option>Children</option><option>Young Adult</option><option>Biography</option><option>History</option><option>Mythology & Spirituality</option><option>Self-help</option><option>Business</option><option>Science & Technology</option><option>Comics & Graphic Novels</option><option>Poetry</option><option>Regional Literature</option></datalist></section></main>`;
   const scriptV2 = `const dashboardTabs=[...document.querySelectorAll('.dashboard-tabs a')],dashboardPanes=[...document.querySelectorAll('.dashboard-pane')];function showDashboardTab(){const requested=location.hash.slice(1),active=dashboardPanes.some(pane=>pane.id===requested)?requested:'borrowed';dashboardPanes.forEach(pane=>pane.hidden=pane.id!==active);dashboardTabs.forEach(tab=>{const selected=tab.dataset.tab===active;tab.classList.toggle('active',selected);tab.setAttribute('aria-current',selected?'page':'false')})}addEventListener('hashchange',showDashboardTab);showDashboardTab();let rowCount=0;
 const rows=document.querySelector('#book-rows'),message=document.querySelector('#book-message');
@@ -681,25 +709,34 @@ async function copyAction(request: Request, env: LibraryEnv, copyId: string) {
 
 async function adminPage(request: Request, env: LibraryEnv) {
   if (!isAdmin(request, env)) return new Response("Administrator login required.", { status: 401, headers: { "www-authenticate": 'Basic realm="Skyrena Library Admin"' } });
-  const [membersResult, loansResult, requestsResult, countsResult] = await env.DB.batch([
-    env.DB.prepare("SELECT id,display_name,block_no,flat_no,mobile_number,status,created_at FROM library_members ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,created_at DESC LIMIT 300"),
+  const url = new URL(request.url), membersPage = requestedPage(url, "membersPage"), loansPage = requestedPage(url, "loansPage");
+  const remindersPage = requestedPage(url, "remindersPage"), requestsPage = requestedPage(url, "requestsPage"), pageLimit = ADMIN_PAGE_SIZE + 1;
+  const [membersResult, loansResult, remindersResult, requestsResult, countsResult] = await env.DB.batch([
+    env.DB.prepare("SELECT id,display_name,block_no,flat_no,mobile_number,status,created_at FROM library_members ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,created_at DESC LIMIT ? OFFSET ?").bind(pageLimit, (membersPage - 1) * ADMIN_PAGE_SIZE),
     env.DB.prepare(`SELECT l.id,l.due_at,l.borrowed_at,t.title,o.display_name owner_name,b.display_name borrower_name,b.block_no,b.flat_no,b.mobile_number,
       (SELECT MAX(a.created_at) FROM audit_log a WHERE a.entity_type='library_loan' AND a.entity_id=l.id AND a.action='reminder_sent') last_reminder_at,
       (SELECT COUNT(*) FROM audit_log a WHERE a.entity_type='library_loan' AND a.entity_id=l.id AND a.action='reminder_sent') reminder_count
       FROM library_loans l JOIN library_copies c ON c.id=l.copy_id JOIN library_titles t ON t.id=c.title_id
       JOIN library_members o ON o.id=l.owner_member_id JOIN library_members b ON b.id=l.borrower_member_id
-      WHERE l.status='active' ORDER BY l.due_at`),
+      WHERE l.status='active' ORDER BY l.due_at LIMIT ? OFFSET ?`).bind(pageLimit, (loansPage - 1) * ADMIN_PAGE_SIZE),
+    env.DB.prepare(`SELECT l.id,l.due_at,l.borrowed_at,t.title,o.display_name owner_name,b.display_name borrower_name,b.block_no,b.flat_no,b.mobile_number,
+      (SELECT MAX(a.created_at) FROM audit_log a WHERE a.entity_type='library_loan' AND a.entity_id=l.id AND a.action='reminder_sent') last_reminder_at,
+      (SELECT COUNT(*) FROM audit_log a WHERE a.entity_type='library_loan' AND a.entity_id=l.id AND a.action='reminder_sent') reminder_count
+      FROM library_loans l JOIN library_copies c ON c.id=l.copy_id JOIN library_titles t ON t.id=c.title_id
+      JOIN library_members o ON o.id=l.owner_member_id JOIN library_members b ON b.id=l.borrower_member_id
+      WHERE l.status='active' AND l.due_at<datetime('now','+3 days') ORDER BY l.due_at LIMIT ? OFFSET ?`).bind(pageLimit, (remindersPage - 1) * ADMIN_PAGE_SIZE),
     env.DB.prepare(`SELECT r.id,r.status,r.created_at,r.reservation_expires_at,t.title,m.display_name,m.block_no,m.flat_no
       FROM library_requests r JOIN library_titles t ON t.id=r.title_id JOIN library_members m ON m.id=r.requester_member_id
-      WHERE r.status IN ('pending','waitlisted','approved') ORDER BY r.created_at`),
+      WHERE r.status IN ('pending','waitlisted','approved') ORDER BY r.created_at LIMIT ? OFFSET ?`).bind(pageLimit, (requestsPage - 1) * ADMIN_PAGE_SIZE),
     env.DB.prepare(`SELECT (SELECT COUNT(*) FROM library_members WHERE status='active') members,
       (SELECT COUNT(*) FROM library_copies WHERE withdrawn_at IS NULL) copies,
       (SELECT COUNT(*) FROM library_loans WHERE status='active') loans,
       (SELECT COUNT(*) FROM library_requests WHERE status='waitlisted') waiting`)
   ]);
-  const members = membersResult.results as Array<Record<string, unknown>>, loans = loansResult.results as Array<Record<string, unknown>>, requests = requestsResult.results as Array<Record<string, unknown>>;
+  const limited = (result: D1Result<unknown>) => (result.results as Array<Record<string, unknown>>).slice(0, ADMIN_PAGE_SIZE);
+  const hasNext = (result: D1Result<unknown>) => result.results.length > ADMIN_PAGE_SIZE;
+  const members = limited(membersResult), loans = limited(loansResult), reminderLoans = limited(remindersResult), requests = limited(requestsResult);
   const counts = (countsResult.results[0] || {}) as Record<string, unknown>;
-  const reminderLoans = loans.filter(row => loanTiming(row.due_at).key !== "upcoming");
   const reminderCounts = reminderLoans.reduce((totals, row) => { totals[loanTiming(row.due_at).key]++; return totals; }, { soon: 0, today: 0, overdue: 0 } as Record<string, number>);
   const memberRows = members.map(row => `<tr><td data-label="Resident"><strong>${esc(row.display_name)}</strong><div class="help">${esc(row.mobile_number)}</div></td><td data-label="Home">Block ${esc(row.block_no)} · ${esc(row.flat_no)}</td><td data-label="Status"><span class="badge ${row.status === "active" ? "available" : row.status === "pending" ? "reserved" : "unavailable"}">${esc(row.status)}</span></td><td data-label="Action"><div class="actions">${row.status !== "active" ? `<form method="post" action="/api/library/admin/members/${esc(row.id)}"><input type="hidden" name="action" value="approve"><button class="button compact">Approve</button></form>` : `<form method="post" action="/api/library/admin/members/${esc(row.id)}"><input type="hidden" name="action" value="suspend"><button class="button-danger compact">Suspend</button></form>`}</div></td></tr>`).join("") || `<tr><td colspan="4" class="empty">No member accounts.</td></tr>`;
   const loanRows = loans.map(row => {
@@ -716,11 +753,15 @@ async function adminPage(request: Request, env: LibraryEnv) {
     return `<tr><td data-label="Priority"><span class="badge ${timing.key === "overdue" ? "overdue" : "reserved"}">${esc(timing.label)}</span></td><td data-label="Book"><strong>${esc(row.title)}</strong><div class="help">Due ${formatDate(row.due_at)}</div></td><td data-label="Borrower">${esc(row.borrower_name)}<div class="help">${esc(row.block_no)}-${esc(row.flat_no)} · ${esc(row.mobile_number)}</div></td><td data-label="Reminder history">${row.last_reminder_at ? `Last recorded ${formatDate(row.last_reminder_at, true)}<div class="help">${Number(row.reminder_count || 0)} reminder${Number(row.reminder_count || 0) === 1 ? "" : "s"}</div>` : '<span class="help">No reminder recorded</span>'}</td><td data-label="Action"><div class="actions"><a class="button compact" target="_blank" rel="noopener" href="${whatsappLink(row.mobile_number, reminder)}">Open WhatsApp</a><form method="post" action="/api/library/admin/loans/${esc(row.id)}/reminder"><button class="button-secondary compact">Mark sent</button></form></div></td></tr>`;
   }).join("") || `<tr><td colspan="5" class="empty">No reminders are due. Loans enter this queue two days before their return date.</td></tr>`;
   const requestRows = requests.map(row => `<tr><td data-label="Book">${esc(row.title)}</td><td data-label="Reader">${esc(row.display_name)} · ${esc(row.block_no)}-${esc(row.flat_no)}</td><td data-label="Status"><span class="badge ${row.status === "approved" ? "reserved" : "available"}">${requestStatus(row.status)}</span>${row.status === "approved" && row.reservation_expires_at ? `<div class="help">Until ${formatDate(row.reservation_expires_at, true)}</div>` : ""}</td><td data-label="Date">${formatDate(row.created_at, true)}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">No open requests.</td></tr>`;
+  const remindersPager = paginationNav(url, "remindersPage", remindersPage, hasNext(remindersResult), "reminders");
+  const membersPager = paginationNav(url, "membersPage", membersPage, hasNext(membersResult), "members");
+  const loansPager = paginationNav(url, "loansPage", loansPage, hasNext(loansResult), "loans");
+  const requestsPager = paginationNav(url, "requestsPage", requestsPage, hasNext(requestsResult), "requests");
   const body = `<main class="wrap"><div class="eyebrow">Library administration</div><h1>Community Library Console</h1><section class="stats"><div class="card stat"><strong>${Number(counts.members || 0)}</strong><span>Active members</span></div><div class="card stat"><strong>${Number(counts.copies || 0)}</strong><span>Book copies</span></div><div class="card stat"><strong>${Number(counts.loans || 0)}</strong><span>Active loans</span></div><div class="card stat"><strong>${Number(counts.waiting || 0)}</strong><span>Waiting</span></div></section>
-  <section class="section panel" id="reminders"><div class="eyebrow">Return follow-up</div><h2 class="section-title">Reminder queue</h2><p class="help">Open the prepared WhatsApp message, send it, then return here and mark it as sent.</p><div class="actions" style="margin-bottom:14px"><span class="badge reserved">${reminderCounts.soon} due soon</span><span class="badge reserved">${reminderCounts.today} due today</span><span class="badge overdue">${reminderCounts.overdue} overdue</span></div><div class="table-wrap"><table class="responsive"><thead><tr><th>Priority</th><th>Book</th><th>Borrower</th><th>History</th><th>Action</th></tr></thead><tbody>${reminderRows}</tbody></table></div></section>
-  <section class="section panel"><h2 class="section-title">Members</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Resident</th><th>Home</th><th>Status</th><th>Action</th></tr></thead><tbody>${memberRows}</tbody></table></div></section>
-  <section class="section panel"><h2 class="section-title">Active loans</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Owner</th><th>Borrower</th><th>Due</th><th>Last reminder</th></tr></thead><tbody>${loanRows}</tbody></table></div></section>
-  <section class="section panel"><h2 class="section-title">Open requests and waiting list</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Reader</th><th>Status</th><th>Date</th></tr></thead><tbody>${requestRows}</tbody></table></div></section></main>`;
+  <section class="section panel" id="reminders"><div class="eyebrow">Return follow-up</div><h2 class="section-title">Reminder queue</h2><p class="help">Open the prepared WhatsApp message, send it, then return here and mark it as sent. Counts below apply to this page.</p><div class="actions" style="margin-bottom:14px"><span class="badge reserved">${reminderCounts.soon} due soon</span><span class="badge reserved">${reminderCounts.today} due today</span><span class="badge overdue">${reminderCounts.overdue} overdue</span></div><div class="table-wrap"><table class="responsive"><thead><tr><th>Priority</th><th>Book</th><th>Borrower</th><th>History</th><th>Action</th></tr></thead><tbody>${reminderRows}</tbody></table></div>${remindersPager}</section>
+  <section class="section panel" id="members"><h2 class="section-title">Members</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Resident</th><th>Home</th><th>Status</th><th>Action</th></tr></thead><tbody>${memberRows}</tbody></table></div>${membersPager}</section>
+  <section class="section panel" id="loans"><h2 class="section-title">Active loans</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Owner</th><th>Borrower</th><th>Due</th><th>Last reminder</th></tr></thead><tbody>${loanRows}</tbody></table></div>${loansPager}</section>
+  <section class="section panel" id="requests"><h2 class="section-title">Open requests and waiting list</h2><div class="table-wrap"><table class="responsive"><thead><tr><th>Book</th><th>Reader</th><th>Status</th><th>Date</th></tr></thead><tbody>${requestRows}</tbody></table></div>${requestsPager}</section></main>`;
   return html(page("Library administration", body, undefined, "", true));
 }
 
