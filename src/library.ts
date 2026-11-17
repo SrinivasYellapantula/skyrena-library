@@ -562,12 +562,13 @@ async function searchBooks(box){
 }
 function fillBook(box,item){
   if(!item)return;
-  box.querySelector('.title').value=item.title||'';box.querySelector('.author').value=item.author||'';box.querySelector('.genre').value=genreOptions.includes(item.genre)?item.genre:'Other';box.querySelector('.isbn').value=item.isbn||'';box.querySelector('.language').value=languageOptions.includes(item.language)?item.language:'English';box.querySelector('.cover').value=item.cover||'';
+  box.querySelector('.title').value=item.title||'';box.querySelector('.author').value=item.author||'';box.querySelector('.genre').value=genreOptions.includes(item.genre)?item.genre:'Other';box.querySelector('.isbn').value=item.isbn||'';box.querySelector('.language').value=languageOptions.includes(item.language)?item.language:'English';box.querySelector('.cover').value=item.cover||'';const preview=box.querySelector('.cover-preview');if(item.cover){preview.src=item.cover;preview.hidden=false}else{preview.removeAttribute('src');preview.hidden=true}
 }
 function addRow(){
   rowCount++;const box=document.createElement('div');box.className='card panel';box.style.marginBottom='14px';
-  box.innerHTML='<div class="actions" style="justify-content:space-between"><strong>Book '+rowCount+'</strong><button type="button" class="button-danger compact remove">Remove</button></div><div class="form-grid"><div class="field full lookup-field"><label>Find book online</label><input class="lookup" placeholder="Start typing an ISBN, title or author" autocomplete="off"><small class="lookup-status">Suggestions appear after 4 characters.</small><select class="results" hidden><option value="">Select a matching edition</option></select></div><div class="field full title-field"><label>Title <span class="required">*</span></label><input class="title" required maxlength="180"></div><div class="field compact-field"><label>Author <span class="required">*</span></label><input class="author" required maxlength="160"></div><div class="field"><label>Genre <span class="required">*</span></label><select class="genre" required>'+genreOptions.map(value=>'<option>'+value+'</option>').join('')+'</select></div><div class="field compact-field"><label>ISBN</label><input class="isbn" inputmode="numeric" maxlength="20"></div><div class="field language-field"><label>Language <span class="required">*</span></label><select class="language" required>'+languageOptions.map(value=>'<option>'+value+'</option>').join('')+'</select></div><div class="field condition-field"><label>Condition</label><select class="condition"><option>Like new</option><option selected>Good</option><option>Well used</option></select></div><div class="field"><label>Notes</label><input class="notes" maxlength="200" placeholder="Edition, minor damage, etc."></div><input class="cover" type="hidden"></div>';
+  box.innerHTML='<div class="actions" style="justify-content:space-between"><strong>Book '+rowCount+'</strong><button type="button" class="button-danger compact remove">Remove</button></div><div class="form-grid"><div class="field full lookup-field"><label>Find book online</label><input class="lookup" placeholder="Start typing an ISBN, title or author" autocomplete="off"><small class="lookup-status">Suggestions appear after 4 characters.</small><select class="results" hidden><option value="">Select a matching edition</option></select></div><div class="field full title-field"><label>Title <span class="required">*</span></label><input class="title" required maxlength="180"></div><div class="field compact-field"><label>Author <span class="required">*</span></label><input class="author" required maxlength="160"></div><div class="field"><label>Genre <span class="required">*</span></label><select class="genre" required>'+genreOptions.map(value=>'<option>'+value+'</option>').join('')+'</select></div><div class="field compact-field"><label>ISBN</label><input class="isbn" inputmode="numeric" maxlength="20"></div><div class="field language-field"><label>Language <span class="required">*</span></label><select class="language" required>'+languageOptions.map(value=>'<option>'+value+'</option>').join('')+'</select></div><div class="field condition-field"><label>Condition</label><select class="condition"><option>Like new</option><option selected>Good</option><option>Well used</option></select></div><div class="field"><label>Notes</label><input class="notes" maxlength="200" placeholder="Edition, minor damage, etc."></div><div class="field"><label>Detected cover</label><img class="cover cover-preview" alt="Detected book cover" hidden></div><input class="cover" type="hidden"></div>';
   rows.append(box);
+  const coverPreview=box.querySelector('.cover-preview');coverPreview.classList.remove('cover');Object.assign(coverPreview.style,{width:'72px',aspectRatio:'2 / 3',objectFit:'cover',borderRadius:'7px',boxShadow:'0 5px 12px #0002'});
   box.querySelector('.remove').onclick=()=>{if(rows.children.length>1)box.remove()};
   const lookup=box.querySelector('.lookup');let timer;
   lookup.oninput=()=>{clearTimeout(timer);const q=lookup.value.trim();const select=box.querySelector('.results'),status=box.querySelector('.lookup-status');if(q.length<4){box._searchSequence=(box._searchSequence||0)+1;select.hidden=true;status.textContent='Suggestions appear after 4 characters.';return}status.textContent='Searching shortly…';timer=setTimeout(()=>searchBooks(box),700)};
@@ -627,16 +628,17 @@ async function addBooks(request: Request, env: LibraryEnv) {
     const requestedLanguage = clean(entry.language, 50), language = ONLINE_SEARCH_LANGUAGES.has(requestedLanguage) ? requestedLanguage : "English";
     const isbn = clean(entry.isbn, 20).replace(/[^0-9Xx]/g, "").toUpperCase();
     const condition = ["Like new", "Good", "Well used"].includes(clean(entry.condition, 30)) ? clean(entry.condition, 30) : "Good";
-    const notes = clean(entry.notes, 200), coverUrl = clean(entry.coverUrl, 500);
+    const notes = clean(entry.notes, 200), coverUrl = clean(entry.coverUrl, 500), validCoverUrl = /^https:\/\//.test(coverUrl) ? coverUrl : "";
     if (title.length < 2 || author.length < 2 || genre.length < 2) return json({ error: "Every book needs a title, author and genre." }, 400);
     const key = isbn ? `isbn:${isbn}` : `book:${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}|${author.toLowerCase().replace(/[^a-z0-9]+/g, "-")}|${language.toLowerCase()}`;
     let book = await env.DB.prepare("SELECT id FROM library_titles WHERE catalogue_key=?").bind(key).first<{ id: string }>();
     if (!book) {
       const titleId = id();
-      await env.DB.prepare(`INSERT OR IGNORE INTO library_titles (id,catalogue_key,isbn,title,author,genre,language,cover_url) VALUES (?,?,?,?,?,?,?,?)`).bind(titleId, key, isbn || null, title, author, genre, language, /^https:\/\//.test(coverUrl) ? coverUrl : null).run();
+      await env.DB.prepare(`INSERT OR IGNORE INTO library_titles (id,catalogue_key,isbn,title,author,genre,language,cover_url) VALUES (?,?,?,?,?,?,?,?)`).bind(titleId, key, isbn || null, title, author, genre, language, validCoverUrl || null).run();
       book = await env.DB.prepare("SELECT id FROM library_titles WHERE catalogue_key=?").bind(key).first<{ id: string }>();
     }
     if (!book) return json({ error: "Unable to create the book record." }, 500);
+    if (validCoverUrl) await env.DB.prepare("UPDATE library_titles SET cover_url=? WHERE id=? AND (cover_url IS NULL OR cover_url='')").bind(validCoverUrl, book.id).run();
     const copyId = id();
     await env.DB.batch([
       env.DB.prepare("INSERT INTO library_copies (id,title_id,owner_member_id,condition_label,notes) VALUES (?,?,?,?,?)").bind(copyId, book.id, member.id, condition, notes || null),
@@ -658,21 +660,35 @@ async function addBooks(request: Request, env: LibraryEnv) {
 async function metadataSearch(request: Request) {
   const q = clean(new URL(request.url).searchParams.get("q"), 100);
   if (q.length < 4) return json({ items: [] });
+  const compactIsbn = q.replace(/[^0-9Xx]/g, "").toUpperCase();
+  const isbnQuery = compactIsbn.length === 10 || (compactIsbn.length === 13 && /^(978|979)/.test(compactIsbn)) ? compactIsbn : "";
+  const exactQuery = isbnQuery ? `isbn:${isbnQuery}` : q;
   try {
-    const response = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&printType=books&maxResults=20&projection=lite`, { cf: { cacheTtl: 86400, cacheEverything: true } });
+    const response = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(exactQuery)}&printType=books&maxResults=20`, { cf: { cacheTtl: 86400, cacheEverything: true } });
     if (response.ok) {
       const data = await response.json() as { items?: Array<{ volumeInfo?: Record<string, unknown> }> };
       const items = uniqueMetadata((data.items || []).map(item => {
         const info = item.volumeInfo || {};
         const identifiers = Array.isArray(info.industryIdentifiers) ? info.industryIdentifiers as Array<Record<string, unknown>> : [];
         const images = (info.imageLinks || {}) as Record<string, unknown>;
-        return { title: clean(info.title, 180), author: Array.isArray(info.authors) ? clean((info.authors as unknown[]).join(", "), 160) : "", genre: canonicalGenre(Array.isArray(info.categories) ? (info.categories as unknown[])[0] : ""), language: languageName(info.language), isbn: clean(identifiers.find(value => value.type === "ISBN_13")?.identifier || identifiers[0]?.identifier, 20), cover: clean(images.thumbnail || images.smallThumbnail, 500).replace(/^http:/, "https:") };
+        return { title: clean(info.title, 180), author: Array.isArray(info.authors) ? clean((info.authors as unknown[]).join(", "), 160) : "", genre: canonicalGenre(Array.isArray(info.categories) ? (info.categories as unknown[])[0] : ""), language: languageName(info.language), isbn: clean(identifiers.find(value => value.type === "ISBN_13")?.identifier || identifiers[0]?.identifier, 20), cover: clean(images.extraLarge || images.large || images.medium || images.small || images.thumbnail || images.smallThumbnail, 500).replace(/^http:/, "https:") };
       }).filter(item => item.title && item.author && ONLINE_SEARCH_LANGUAGES.has(item.language)));
+      if (isbnQuery && items.length && !items[0].cover) {
+        try {
+          const coverResponse = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(isbnQuery)}&jscmd=data&format=json`, { headers: { "user-agent": "SkyrenaCommunityLibrary/1.0" }, cf: { cacheTtl: 604800, cacheEverything: true } });
+          if (coverResponse.ok) {
+            const coverData = await coverResponse.json() as Record<string, { cover?: Record<string, unknown> }>;
+            const covers = coverData[`ISBN:${isbnQuery}`]?.cover || {};
+            const cover = clean(covers.large || covers.medium || covers.small, 500).replace(/^http:/, "https:");
+            if (cover) items[0].cover = cover;
+          }
+        } catch { /* The book details remain usable without a cover. */ }
+      }
       if (items.length) return json({ items }, 200);
     }
   } catch { /* Open Library fallback below */ }
   try {
-    const response = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=24&fields=key,title,author_name,subject,isbn,language,cover_i`, { headers: { "user-agent": "SkyrenaCommunityLibrary/1.0" }, cf: { cacheTtl: 86400, cacheEverything: true } });
+    const response = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(exactQuery)}&limit=24&fields=key,title,author_name,subject,isbn,language,cover_i`, { headers: { "user-agent": "SkyrenaCommunityLibrary/1.0" }, cf: { cacheTtl: 86400, cacheEverything: true } });
     if (!response.ok) throw new Error("Metadata service unavailable");
     const data = await response.json() as { docs?: Array<Record<string, unknown>> };
     const items = uniqueMetadata((data.docs || []).map(book => {
