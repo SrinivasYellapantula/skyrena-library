@@ -33,7 +33,7 @@ const CATALOGUE_GENRES = [
   "Poetry",
   "Biography & Memoir",
   "History",
-  "Mythology & Spirituality",
+  "Religion, Spirituality & Philosophy",
   "Self-help",
   "Business",
   "Science & Technology",
@@ -63,7 +63,7 @@ function canonicalGenre(value: unknown): CatalogueGenre {
   if (/comic|graphic novel/.test(raw)) return "Comics & Graphic Novels";
   if (/poetry|poem/.test(raw)) return "Poetry";
   if (/biograph|memoir|autobiograph/.test(raw)) return "Biography & Memoir";
-  if (/myth|spiritual|religion/.test(raw)) return "Mythology & Spirituality";
+  if (/myth|spiritual|religion|theolog|philosoph|bhagavad|bhakti|consciousness/.test(raw)) return "Religion, Spirituality & Philosophy";
   if (/self[ -]?help/.test(raw)) return "Self-help";
   if (/business|econom|finance|management/.test(raw)) return "Business";
   if (/technology|computer|engineering|science/.test(raw)) return "Science & Technology";
@@ -493,7 +493,7 @@ async function dashboardPage(request: Request, env: LibraryEnv) {
     const overdue = copy.due_at && new Date(String(copy.due_at).replace(" ", "T") + "Z").getTime() < Date.now();
     const loanInfo = copy.borrower_name ? `<div class="help">With ${esc(copy.borrower_name)} · ${esc(copy.borrower_block)}-${esc(copy.borrower_flat)} · due ${formatDate(copy.due_at)} ${overdue ? '<span class="badge overdue">Overdue</span>' : ""}</div>` : "";
     const removable = copy.status === "available" || copy.status === "unavailable";
-    const editForm = `<details class="book-edit"><summary class="button-secondary compact">Edit details</summary><form method="post" action="/api/library/copies/${esc(copy.id)}/action" class="edit-book-form"><input type="hidden" name="action" value="edit"><div class="field full"><label>Title <span class="required">*</span></label><input name="title" value="${esc(copy.title)}" required maxlength="180"></div><div class="field"><label>Author <span class="required">*</span></label><input name="author" value="${esc(copy.author)}" required maxlength="160"></div><div class="field"><label>Genre <span class="required">*</span></label><select name="genre" required>${genreSelectOptions(copy.genre)}</select></div><div class="field"><label>Language <span class="required">*</span></label><select name="language" required>${["English","Hindi","Telugu"].map(language => `<option ${copy.language === language ? "selected" : ""}>${language}</option>`).join("")}</select></div><div class="field"><label>ISBN</label><input name="isbn" value="${esc(copy.isbn)}" inputmode="numeric" maxlength="20"></div><div class="field"><label>Condition</label><select name="condition"><option ${copy.condition_label === "Like new" ? "selected" : ""}>Like new</option><option ${copy.condition_label === "Good" ? "selected" : ""}>Good</option><option ${copy.condition_label === "Well used" ? "selected" : ""}>Well used</option></select></div><div class="field"><label>Notes</label><input name="notes" value="${esc(copy.notes)}" maxlength="200"></div><div class="field full"><label>Cover image URL</label><input name="coverUrl" value="${esc(copy.cover_url)}" type="url" maxlength="500" placeholder="https://..."></div><div class="actions full"><button type="submit" class="button compact">Save changes</button><button type="button" class="button-secondary compact" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></form></details>`;
+    const editForm = `<details class="book-edit"><summary class="button-secondary compact">Edit details</summary><form method="post" action="/api/library/copies/${esc(copy.id)}/action" class="edit-book-form"><input type="hidden" name="action" value="edit"><input type="hidden" name="shelfPage" value="${shelfPage}"><div class="field full"><label>Title <span class="required">*</span></label><input name="title" value="${esc(copy.title)}" required maxlength="180"></div><div class="field"><label>Author <span class="required">*</span></label><input name="author" value="${esc(copy.author)}" required maxlength="160"></div><div class="field"><label>Genre <span class="required">*</span></label><select name="genre" required>${genreSelectOptions(copy.genre)}</select></div><div class="field"><label>Language <span class="required">*</span></label><select name="language" required>${["English","Hindi","Telugu"].map(language => `<option ${copy.language === language ? "selected" : ""}>${language}</option>`).join("")}</select></div><div class="field"><label>ISBN</label><input name="isbn" value="${esc(copy.isbn)}" inputmode="numeric" maxlength="20"></div><div class="field"><label>Condition</label><select name="condition"><option ${copy.condition_label === "Like new" ? "selected" : ""}>Like new</option><option ${copy.condition_label === "Good" ? "selected" : ""}>Good</option><option ${copy.condition_label === "Well used" ? "selected" : ""}>Well used</option></select></div><div class="field"><label>Notes</label><input name="notes" value="${esc(copy.notes)}" maxlength="200"></div><div class="field full"><label>Cover image URL</label><input name="coverUrl" value="${esc(copy.cover_url)}" type="url" maxlength="500" placeholder="https://..."></div><div class="actions full"><button type="submit" class="button compact">Save changes</button><button type="button" class="button-secondary compact" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></form></details>`;
     return `<tr><td data-label="Book"><strong>${esc(copy.title)}</strong><div class="help">${esc(copy.author)} · ${esc(copy.genre)}</div></td><td data-label="Status"><span class="badge ${esc(copy.status)}">${esc(copy.status)}</span>${loanInfo}</td><td data-label="Action"><div class="actions">${editForm}${copy.status === "available" ? `<form method="post" action="/api/library/copies/${esc(copy.id)}/action"><input type="hidden" name="action" value="pause"><button class="button-secondary compact">Pause</button></form>` : copy.status === "unavailable" ? `<form method="post" action="/api/library/copies/${esc(copy.id)}/action"><input type="hidden" name="action" value="resume"><button class="button-secondary compact">Make available</button></form>` : copy.status === "borrowed" ? `<form method="post" action="/api/library/copies/${esc(copy.id)}/action"><input type="hidden" name="action" value="return"><button class="button compact">Confirm return</button></form>` : ""}${removable ? `<form method="post" action="/api/library/copies/${esc(copy.id)}/action" onsubmit="return confirm('Remove this book from your shelf and the community catalogue?')"><input type="hidden" name="action" value="remove"><button class="button-danger compact">Remove from shelf</button></form>` : ""}</div></td></tr>`;
   }).join("") || `<tr><td colspan="3" class="empty">You have not added any books yet.</td></tr>`;
   const incomingRows = incoming.map(entry => {
@@ -753,6 +753,12 @@ async function copyAction(request: Request, env: LibraryEnv, copyId: string) {
   if (!member || member.status !== "active") return redirect(request, "/library/login?error=Please+sign+in.");
   const form = await request.formData();
   const action = formValue(form, "action", 20);
+  const submittedShelfPage = Math.min(100, Math.max(1, Number.parseInt(formValue(form, "shelfPage", 4), 10) || 1));
+  const editRedirect = (kind: "success" | "error", message: string) => {
+    const params = new URLSearchParams({ [kind]: message });
+    if (submittedShelfPage > 1) params.set("shelfPage", String(submittedShelfPage));
+    return redirect(request, `/library/dashboard?${params.toString()}#shelf`);
+  };
   const copy = await env.DB.prepare(`SELECT c.id,c.title_id,c.status,c.condition_label,c.notes,
     t.catalogue_key,t.isbn,t.title,t.author,t.genre,t.language,t.cover_url
     FROM library_copies c JOIN library_titles t ON t.id=c.title_id
@@ -767,8 +773,8 @@ async function copyAction(request: Request, env: LibraryEnv, copyId: string) {
     const requestedCondition = formValue(form, "condition", 30);
     const condition = ["Like new", "Good", "Well used"].includes(requestedCondition) ? requestedCondition : "Good";
     const notes = formValue(form, "notes", 200), coverUrl = formValue(form, "coverUrl", 500);
-    if (title.length < 2 || author.length < 2) return redirect(request, "/library/dashboard?error=Enter+a+valid+title+and+author.#shelf");
-    if (coverUrl && !/^https:\/\//i.test(coverUrl)) return redirect(request, "/library/dashboard?error=The+cover+image+must+use+an+HTTPS+URL.#shelf");
+    if (title.length < 2 || author.length < 2) return editRedirect("error", "Enter a valid title and author.");
+    if (coverUrl && !/^https:\/\//i.test(coverUrl)) return editRedirect("error", "The cover image must use an HTTPS URL.");
     const otherCopies = await env.DB.prepare("SELECT COUNT(*) count FROM library_copies WHERE title_id=? AND id<>? AND withdrawn_at IS NULL").bind(copy.title_id, copyId).first<{ count: number }>();
     const before = JSON.stringify({ title: copy.title, author: copy.author, genre: copy.genre, language: copy.language, isbn: copy.isbn, condition: copy.condition_label, notes: copy.notes });
     const after = JSON.stringify({ title, author, genre, language, isbn, condition, notes });
@@ -787,7 +793,7 @@ async function copyAction(request: Request, env: LibraryEnv, copyId: string) {
         env.DB.prepare("INSERT INTO audit_log (entity_type,entity_id,action,actor,before_json,after_json) VALUES ('library_copy',?,'details_edited',?,?,?)").bind(copyId, member.id, before, after)
       ]);
     }
-    return redirect(request, "/library/dashboard?success=Book+details+updated.#shelf");
+    return editRedirect("success", "Book details updated.");
   }
   if (action === "pause" && copy.status === "available") await env.DB.prepare("UPDATE library_copies SET status='unavailable',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(copyId).run();
   else if (action === "resume" && copy.status === "unavailable") {
