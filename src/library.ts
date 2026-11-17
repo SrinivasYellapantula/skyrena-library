@@ -697,7 +697,7 @@ async function metadataSearch(request: Request) {
       const subjects = Array.isArray(book.subject) ? book.subject as unknown[] : [];
       const isbns = Array.isArray(book.isbn) ? book.isbn as unknown[] : [];
       const languages = Array.isArray(book.language) ? book.language as unknown[] : [];
-      const preferredLanguage = languages.map(languageName).find(language => ONLINE_SEARCH_LANGUAGES.has(language)) || "Other";
+      const preferredLanguage = isbnQuery ? "English" : languages.map(languageName).find(language => ONLINE_SEARCH_LANGUAGES.has(language)) || "Other";
       const coverId = Number(book.cover_i || 0);
       return { title: clean(book.title, 180), author: clean(authors.slice(0, 3).join(", "), 160), genre: canonicalGenre(subjects[0]), language: preferredLanguage, isbn: isbnQuery || clean(isbns.find(value => String(value).length === 13) || isbns[0], 20), cover: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg` : "" };
     }).filter(item => item.title && item.author && ONLINE_SEARCH_LANGUAGES.has(item.language)));
