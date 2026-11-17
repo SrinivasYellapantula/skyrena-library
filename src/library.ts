@@ -53,6 +53,9 @@ function canonicalGenre(value: unknown): CatalogueGenre {
   const raw = clean(value, 100).toLowerCase();
   const exact = CATALOGUE_GENRES.find(genre => genre.toLowerCase() === raw);
   if (exact) return exact;
+  const primary = raw.split(",", 1)[0].trim();
+  const primaryExact = CATALOGUE_GENRES.find(genre => genre.toLowerCase() === primary);
+  if (primaryExact) return primaryExact;
   if (/suspense|thriller/.test(raw)) return "Suspense & Thriller";
   if (/mystery|crime|detective/.test(raw)) return "Mystery & Crime";
   if (/science fiction|sci[ -]?fi/.test(raw)) return "Science Fiction";
@@ -63,17 +66,17 @@ function canonicalGenre(value: unknown): CatalogueGenre {
   if (/comic|graphic novel/.test(raw)) return "Comics & Graphic Novels";
   if (/poetry|poem/.test(raw)) return "Poetry";
   if (/biograph|memoir|autobiograph/.test(raw)) return "Biography & Memoir";
-  if (/myth|spiritual|religion|theolog|philosoph|bhagavad|bhakti|consciousness/.test(raw)) return "Religion, Spirituality & Philosophy";
-  if (/self[ -]?help/.test(raw)) return "Self-help";
+  if (/myth|spiritual|religion|theolog|philosoph|humanism|bhagavad|bhakti|consciousness/.test(raw)) return "Religion, Spirituality & Philosophy";
+  if (/self[ -]?help|advice|how[ -]?to|technique/.test(raw)) return "Self-help";
   if (/business|econom|finance|management/.test(raw)) return "Business";
-  if (/technology|computer|engineering|science/.test(raw)) return "Science & Technology";
+  if (/technology|computer|engineering|science|medicine|medical|heparin|ayurved/.test(raw)) return "Science & Technology";
   if (/regional/.test(raw)) return "Regional Literature";
   if (/regency/.test(raw)) return "Regency";
-  if (/romance/.test(raw)) return "Romance";
+  if (/romance|love stor/.test(raw)) return "Romance";
   if (/historical/.test(raw)) return "Historical";
   if (/history/.test(raw)) return "History";
   if (/non[ -]?fiction/.test(raw)) return "Non-fiction";
-  if (/fiction/.test(raw)) return "Fiction";
+  if (/fiction|novel|drama|narrative|famil/.test(raw)) return "Fiction";
   return "Other";
 }
 
@@ -806,6 +809,10 @@ async function copyAction(request: Request, env: LibraryEnv, copyId: string) {
       env.DB.prepare("UPDATE library_copies SET status='available',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(copyId),
       env.DB.prepare("INSERT INTO audit_log (entity_type,entity_id,action,actor) VALUES ('library_loan',?,'returned',?)").bind(loan.id, member.id)
     ]);
+    const waiting = await env.DB.prepare("SELECT COUNT(*) count FROM library_requests WHERE title_id=? AND status='waitlisted'").bind(copy.title_id).first<{ count: number }>();
+    if (Number(waiting?.count || 0) > 0) {
+      return redirect(request, "/library/dashboard?success=Return+confirmed.+The+book+is+available.+Please+choose+a+waiting+reader.#incoming");
+    }
     return redirect(request, "/library/dashboard?success=Return+confirmed.+The+book+is+available+again.#shelf");
   } else if (action === "remove" && (copy.status === "available" || copy.status === "unavailable")) {
     await env.DB.batch([
