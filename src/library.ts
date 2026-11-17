@@ -548,16 +548,16 @@ const rows=document.querySelector('#book-rows'),message=document.querySelector('
 const languageOptions=['English','Hindi','Telugu'];
 const genreOptions=${JSON.stringify(CATALOGUE_GENRES)};
 function escapeHtml(value){return String(value||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function fetchMetadata(q){const response=await fetch('/api/library/metadata?q='+encodeURIComponent(q));if(!response.ok)throw new Error('Metadata search failed.');const result=await response.json();return result.items||[]}
+function showMetadataOptions(box,items){const select=box.querySelector('.results');select._items=items;select.innerHTML='<option value="">Select a matching edition</option>'+items.map((item,index)=>'<option value="'+index+'">'+escapeHtml(item.title)+' — '+escapeHtml(item.author)+(item.language?' · '+escapeHtml(item.language):'')+'</option>').join('');select.hidden=!items.length;return select}
 async function searchBooks(box){
   const lookup=box.querySelector('.lookup'),select=box.querySelector('.results'),status=box.querySelector('.lookup-status'),q=lookup.value.trim();
   if(q.length<4)return;
   const sequence=(box._searchSequence||0)+1;box._searchSequence=sequence;status.textContent='Searching…';
   try{
-    const response=await fetch('/api/library/metadata?q='+encodeURIComponent(q)),result=await response.json();
+    const items=await fetchMetadata(q);
     if(sequence!==box._searchSequence)return;
-    select._items=result.items||[];
-    select.innerHTML='<option value="">Select a matching edition</option>'+select._items.map((item,index)=>'<option value="'+index+'">'+escapeHtml(item.title)+' — '+escapeHtml(item.author)+(item.language?' · '+escapeHtml(item.language):'')+'</option>').join('');
-    select.hidden=!select._items.length;status.textContent=select._items.length?'Choose the correct title and edition below.':'No English, Hindi or Telugu match found. You can enter the details manually.';
+    showMetadataOptions(box,items);status.textContent=items.length?'Choose the correct title and edition below.':'No English, Hindi or Telugu match found. You can enter the details manually.';
   }catch(error){if(sequence===box._searchSequence){select.hidden=true;status.textContent='Online search is unavailable. You can enter the details manually.'}}
 }
 function fillBook(box,item){
@@ -595,14 +595,23 @@ function isbnFromText(text){
   const matches=text.match(/(?:97[89][\\d\\s-]{10,18}|\\b[\\dXx][\\dXx\\s-]{8,16}\\b)/g)||[];
   for(const match of matches){const value=match.replace(/[^\\dXx]/g,'').toUpperCase();if((value.length===13&&/^(978|979)/.test(value))||value.length===10)return value}return '';
 }
-function searchPhraseFromText(text){
+function coverTextLines(text){
   const ignored=/^(international|national|new york times|bestseller|best seller|a novel|novel|edition|penguin|published|publishing)$/i;
-  const lines=text.split(/\\r?\\n/).map(line=>line.replace(/[^\\p{L}\\p{N}&:'’ -]/gu,' ').replace(/\\s+/g,' ').trim()).filter(line=>line.length>2&&line.length<80&&!ignored.test(line)&&!/^\\d+$/.test(line));
-  return lines.slice(0,4).join(' ').slice(0,100);
+  return text.split(/\\r?\\n/).map(line=>line.replace(/[^\\p{L}\\p{N}&:'’ -]/gu,' ').replace(/\\s+/g,' ').trim()).filter(line=>line.length>2&&line.length<80&&!ignored.test(line)&&!/^\\d+$/.test(line));
+}
+function coverCandidates(text){
+  const lines=coverTextLines(text).slice(0,7),values=[];if(lines.length>1)values.push(lines.slice(0,2).join(' '));if(lines.length>2)values.push(lines.slice(0,3).join(' '));values.push(...lines);return [...new Set(values.map(value=>value.slice(0,100)))].filter(value=>value.length>3).slice(0,5);
+}
+function searchableTokens(value){return String(value||'').toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu,' ').split(/\\s+/).filter(word=>word.length>2)}
+function coverMatchScore(item,text){
+  const seen=new Set(searchableTokens(text)),title=searchableTokens(item.title),author=searchableTokens(item.author);if(!title.length)return 0;const titleScore=title.filter(word=>seen.has(word)).length/title.length,authorScore=author.length?author.filter(word=>seen.has(word)).length/author.length:0;return titleScore*4+authorScore*1.5;
+}
+async function findCoverMatch(text){
+  let best=null;for(const query of coverCandidates(text)){let items=[];try{items=await fetchMetadata(query)}catch(error){continue}for(const item of items){const score=coverMatchScore(item,text);if(!best||score>best.score)best={query,item,items,score}}if(best&&best.score>=4.5)break}return best&&best.score>=2.2?best:null;
 }
 async function identifyPhoto(file,box,index,total){
   const progress=document.querySelector('#photo-progress');progress.textContent='Checking photo '+index+' of '+total+'…';let query=await findIsbn(file);
-  if(!query){const text=await ocrImage(file);query=isbnFromText(text)||searchPhraseFromText(text)}
+  if(!query){const text=await ocrImage(file);query=isbnFromText(text);if(!query){const match=await findCoverMatch(text),status=box.querySelector('.lookup-status');if(match){box.querySelector('.lookup').value=match.query;const select=showMetadataOptions(box,match.items),selected=match.items.indexOf(match.item);select.value=String(selected);fillBook(box,match.item);status.textContent='Matched from the cover photo. Please review all details before saving.';return true}const candidate=coverCandidates(text)[0]||'';if(candidate){box.querySelector('.lookup').value=candidate;await searchBooks(box);status.textContent='The cover was read, but no confident match was found. Choose an edition below or edit the details.'}else status.textContent='No readable title was found. Retake the photo straight-on, in good light, without glare.';return false}}
   const status=box.querySelector('.lookup-status');if(!query){status.textContent='Could not read this cover. Enter the details manually.';return false}
   box.querySelector('.lookup').value=query;await searchBooks(box);const select=box.querySelector('.results'),item=select._items?.[0];if(item){select.value='0';fillBook(box,item);status.textContent='Matched from the photo. Please review all details before saving.';return true}status.textContent='No confident online match was found. Please correct the details manually.';return false;
 }
