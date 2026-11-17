@@ -569,23 +569,22 @@ function addRow(){
   box.innerHTML='<div class="actions" style="justify-content:space-between"><strong>Book '+rowCount+'</strong><button type="button" class="button-danger compact remove">Remove</button></div><div class="form-grid"><div class="field full lookup-field"><label>Find book online</label><input class="lookup" placeholder="Start typing an ISBN, title or author" autocomplete="off"><small class="lookup-status">Suggestions appear after 4 characters.</small><select class="results" hidden><option value="">Select a matching edition</option></select></div><div class="field full title-field"><label>Title <span class="required">*</span></label><input class="title" required maxlength="180"></div><div class="field compact-field"><label>Author <span class="required">*</span></label><input class="author" required maxlength="160"></div><div class="field"><label>Genre <span class="required">*</span></label><select class="genre" required>'+genreOptions.map(value=>'<option>'+value+'</option>').join('')+'</select></div><div class="field compact-field"><label>ISBN</label><input class="isbn" inputmode="numeric" maxlength="20"></div><div class="field language-field"><label>Language <span class="required">*</span></label><select class="language" required>'+languageOptions.map(value=>'<option>'+value+'</option>').join('')+'</select></div><div class="field condition-field"><label>Condition</label><select class="condition"><option>Like new</option><option selected>Good</option><option>Well used</option></select></div><div class="field"><label>Notes</label><input class="notes" maxlength="200" placeholder="Edition, minor damage, etc."></div><div class="field"><label>Detected cover</label><img class="cover cover-preview" alt="Detected book cover" hidden></div><input class="cover" type="hidden"></div>';
   rows.append(box);
   const coverPreview=box.querySelector('.cover-preview');coverPreview.classList.remove('cover');Object.assign(coverPreview.style,{width:'72px',aspectRatio:'2 / 3',objectFit:'cover',borderRadius:'7px',boxShadow:'0 5px 12px #0002'});
-  box.querySelector('.remove').onclick=()=>{if(rows.children.length>1)box.remove()};
+  box.querySelector('.remove').onclick=()=>box.remove();
   const lookup=box.querySelector('.lookup');let timer;
   lookup.oninput=()=>{clearTimeout(timer);const q=lookup.value.trim();const select=box.querySelector('.results'),status=box.querySelector('.lookup-status');if(q.length<4){box._searchSequence=(box._searchSequence||0)+1;select.hidden=true;status.textContent='Suggestions appear after 4 characters.';return}status.textContent='Searching shortly…';timer=setTimeout(()=>searchBooks(box),700)};
   lookup.onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();clearTimeout(timer);searchBooks(box)}};
   box.querySelector('.results').onchange=event=>fillBook(box,event.target._items?.[Number(event.target.value)]);
   return box;
 }
-let ocrLibraryPromise,ocrWorker;
+let ocrLibraryPromise,barcodeLibraryPromise,ocrWorker;
 function loadOcrLibrary(){
   if(globalThis.Tesseract)return Promise.resolve();
   if(!ocrLibraryPromise)ocrLibraryPromise=new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js';script.onload=resolve;script.onerror=()=>reject(new Error('Photo recognition could not be loaded.'));document.head.append(script)});
   return ocrLibraryPromise;
 }
 async function findIsbn(file){
-  if(!('BarcodeDetector' in globalThis)||!('createImageBitmap' in globalThis))return '';
-  let bitmap;
-  try{const supported=await BarcodeDetector.getSupportedFormats(),formats=['ean_13','ean_8','upc_a','upc_e'].filter(format=>supported.includes(format));if(!formats.length)return '';bitmap=await createImageBitmap(file);const found=await new BarcodeDetector({formats}).detect(bitmap);for(const code of found){const digits=String(code.rawValue||'').replace(/\\D/g,'');if((digits.length===13&&/^(978|979)/.test(digits))||digits.length===10)return digits}}catch(error){}finally{bitmap?.close?.()}return '';
+  if('BarcodeDetector' in globalThis&&'createImageBitmap' in globalThis){let bitmap;try{const supported=await BarcodeDetector.getSupportedFormats(),formats=['ean_13','ean_8','upc_a','upc_e'].filter(format=>supported.includes(format));if(formats.length){bitmap=await createImageBitmap(file);const found=await new BarcodeDetector({formats}).detect(bitmap);for(const code of found){const digits=String(code.rawValue||'').replace(/\\D/g,'');if((digits.length===13&&/^(978|979)/.test(digits))||digits.length===10)return digits}}}catch(error){}finally{bitmap?.close?.()}}
+  try{if(!globalThis.ZXingBrowser){if(!barcodeLibraryPromise)barcodeLibraryPromise=new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js';script.onload=resolve;script.onerror=()=>reject(new Error('Barcode reader could not be loaded.'));document.head.append(script)});await barcodeLibraryPromise}const url=URL.createObjectURL(file);try{const reader=new ZXingBrowser.BrowserMultiFormatReader(),result=await reader.decodeFromImageUrl(url),digits=String(result?.getText?.()||result?.text||'').replace(/\\D/g,'');if((digits.length===13&&/^(978|979)/.test(digits))||digits.length===10)return digits}finally{URL.revokeObjectURL(url)}}catch(error){}return '';
 }
 async function ocrImage(file){
   await loadOcrLibrary();
