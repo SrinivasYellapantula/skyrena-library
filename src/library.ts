@@ -672,7 +672,7 @@ async function metadataSearch(request: Request) {
         const identifiers = Array.isArray(info.industryIdentifiers) ? info.industryIdentifiers as Array<Record<string, unknown>> : [];
         const images = (info.imageLinks || {}) as Record<string, unknown>;
         return { title: clean(info.title, 180), author: Array.isArray(info.authors) ? clean((info.authors as unknown[]).join(", "), 160) : "", genre: canonicalGenre(Array.isArray(info.categories) ? (info.categories as unknown[])[0] : ""), language: languageName(info.language), isbn: clean(identifiers.find(value => value.type === "ISBN_13")?.identifier || identifiers[0]?.identifier, 20), cover: clean(images.extraLarge || images.large || images.medium || images.small || images.thumbnail || images.smallThumbnail, 500).replace(/^http:/, "https:") };
-      }).filter(item => item.title && item.author && ONLINE_SEARCH_LANGUAGES.has(item.language)));
+      }).filter(item => item.title && item.author && ONLINE_SEARCH_LANGUAGES.has(item.language) && (!isbnQuery || item.isbn.replace(/[^0-9Xx]/g, "").toUpperCase() === isbnQuery)));
       if (isbnQuery && items.length && !items[0].cover) {
         try {
           const coverResponse = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(isbnQuery)}&jscmd=data&format=json`, { headers: { "user-agent": "SkyrenaCommunityLibrary/1.0" }, cf: { cacheTtl: 604800, cacheEverything: true } });
@@ -691,14 +691,15 @@ async function metadataSearch(request: Request) {
     const response = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(exactQuery)}&limit=24&fields=key,title,author_name,subject,isbn,language,cover_i`, { headers: { "user-agent": "SkyrenaCommunityLibrary/1.0" }, cf: { cacheTtl: 86400, cacheEverything: true } });
     if (!response.ok) throw new Error("Metadata service unavailable");
     const data = await response.json() as { docs?: Array<Record<string, unknown>> };
-    const items = uniqueMetadata((data.docs || []).map(book => {
+    const exactDocs = (data.docs || []).filter(book => !isbnQuery || (Array.isArray(book.isbn) && (book.isbn as unknown[]).some(value => String(value).replace(/[^0-9Xx]/g, "").toUpperCase() === isbnQuery)));
+    const items = uniqueMetadata(exactDocs.map(book => {
       const authors = Array.isArray(book.author_name) ? book.author_name as unknown[] : [];
       const subjects = Array.isArray(book.subject) ? book.subject as unknown[] : [];
       const isbns = Array.isArray(book.isbn) ? book.isbn as unknown[] : [];
       const languages = Array.isArray(book.language) ? book.language as unknown[] : [];
       const preferredLanguage = languages.map(languageName).find(language => ONLINE_SEARCH_LANGUAGES.has(language)) || "Other";
       const coverId = Number(book.cover_i || 0);
-      return { title: clean(book.title, 180), author: clean(authors.slice(0, 3).join(", "), 160), genre: canonicalGenre(subjects[0]), language: preferredLanguage, isbn: clean(isbns.find(value => String(value).length === 13) || isbns[0], 20), cover: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg` : "" };
+      return { title: clean(book.title, 180), author: clean(authors.slice(0, 3).join(", "), 160), genre: canonicalGenre(subjects[0]), language: preferredLanguage, isbn: isbnQuery || clean(isbns.find(value => String(value).length === 13) || isbns[0], 20), cover: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg` : "" };
     }).filter(item => item.title && item.author && ONLINE_SEARCH_LANGUAGES.has(item.language)));
     return json({ items });
   } catch { return json({ items: [] }); }
