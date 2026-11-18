@@ -264,6 +264,29 @@ function redirect(request: Request, path: string, headers: HeadersInit = {}) {
   return new Response(null, { status: 303, headers: { location: new URL(path, request.url).toString(), ...headers } });
 }
 
+function isSameOriginPost(request: Request) {
+  const url = new URL(request.url);
+  const expectedOrigin = url.origin;
+
+  const origin = request.headers.get("origin");
+  if (origin) return origin === expectedOrigin;
+
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      return new URL(referer).origin === expectedOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite) return fetchSite === "same-origin";
+
+  // If we cannot establish same-origin, reject (strict mode).
+  return false;
+}
+
 function messageFrom(url: URL) {
   const success = clean(url.searchParams.get("success"), 220);
   const error = clean(url.searchParams.get("error"), 220);
@@ -731,30 +754,187 @@ async function metadataSearch(request: Request) {
 
 async function createRequest(request: Request, env: LibraryEnv) {
   const member = await sessionMember(request, env);
-  if (!member || member.status !== "active") return json({ error: "Verified library membership required." }, 401);
+  if (!member || member.status !== "active") {
+    return json({ error: "Verified library membership required." }, 401);
+  }
+
   let body: { titleId?: string };
-  try { body = await request.json(); } catch { return json({ error: "Invalid request." }, 400); }
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid request." }, 400);
+  }
+
   const titleId = clean(body.titleId, 50);
-  const title = await env.DB.prepare("SELECT id,title FROM library_titles WHERE id=?").bind(titleId).first<{ id: string; title: string }>();
+  if (!titleId) return json({ error: "Book not found." }, 404);
+
+  const title = await env.DB.prepare("SELECT id,title FROM library_titles WHERE id=?")
+    .bind(titleId)
+    .first<{ id: string; title: string }>();
   if (!title) return json({ error: "Book not found." }, 404);
-  const existing = await env.DB.prepare("SELECT id FROM library_requests WHERE title_id=? AND requester_member_id=? AND status IN ('pending','waitlisted','approved')").bind(titleId, member.id).first();
+
+  // Invariant: one open request per member per title.
+  const existing = await env.DB.prepare(
+    "SELECT id FROM library_requests WHERE title_id=? AND requester_member_id=? AND status IN ('pending','waitlisted','approved')"
+  )
+    .bind(titleId, member.id)
+    .first();
   if (existing) return json({ error: "You already have an active request for this title." }, 409);
-  const loanCount = await env.DB.prepare("SELECT COUNT(*) count FROM library_loans WHERE borrower_member_id=? AND status='active'").bind(member.id).first<{ count: number }>();
-  if (Number(loanCount?.count || 0) >= 2) return json({ error: "Please return one of your current books before requesting another." }, 409);
-  const copy = await env.DB.prepare(`SELECT c.id,m.display_name owner_name,m.mobile_number owner_mobile FROM library_copies c JOIN library_members m ON m.id=c.owner_member_id
-    WHERE c.title_id=? AND c.status='available' AND c.withdrawn_at IS NULL AND c.owner_member_id!=? AND m.status='active'
-      AND NOT EXISTS (SELECT 1 FROM library_requests waiting WHERE waiting.title_id=? AND waiting.status='waitlisted')
-    ORDER BY c.created_at LIMIT 1`).bind(titleId, member.id, titleId).first<{ id: string; owner_name: string; owner_mobile: string }>();
-  const requestId = id(), status = copy ? "pending" : "waitlisted";
-  const statements = [
-    env.DB.prepare("INSERT INTO library_requests (id,title_id,copy_id,requester_member_id,status) VALUES (?,?,?,?,?)").bind(requestId, titleId, copy?.id || null, member.id, status),
-    env.DB.prepare("INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) VALUES ('library_request',?,'created',?,?)").bind(requestId, member.id, JSON.stringify({ titleId, status, copyId: copy?.id || null }))
-  ];
-  if (copy) statements.push(env.DB.prepare("UPDATE library_copies SET status='reserved',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='available'").bind(copy.id));
-  await env.DB.batch(statements);
-  const notifyOwnerUrl = copy ? whatsappLink(copy.owner_mobile, `Hi ${copy.owner_name}, I am ${member.display_name} from ${member.block_no}-${member.flat_no}. I have requested "${title.title}" through Skyrena Community Library. Please review it under My Library > Incoming.`) : null;
-  return json({ ok: true, message: copy ? "Book request recorded." : "All copies are in use. You have joined the waiting list.", notifyOwnerUrl });
+
+  // Invariant: max 2 active loans.
+  const loanCount = await env.DB.prepare(
+    "SELECT COUNT(*) count FROM library_loans WHERE borrower_member_id=? AND status='active'"
+  )
+    .bind(member.id)
+    .first<{ count: number }>();
+  if (Number(loanCount?.count || 0) >= 2) {
+    return json({ error: "Please return one of your current books before requesting another." }, 409);
+  }
+
+  // Stricter invariant: don’t allow requesting a title you already have on loan (API-side enforcement).
+  const hasSameTitleLoan = await env.DB.prepare(
+    `SELECT 1
+       FROM library_loans l
+       JOIN library_copies c ON c.id=l.copy_id
+      WHERE l.borrower_member_id=? AND l.status='active' AND c.title_id=?
+      LIMIT 1`
+  )
+    .bind(member.id, titleId)
+    .first();
+  if (hasSameTitleLoan) {
+    return json({ error: "You already have this title on loan." }, 409);
+  }
+
+  // Stricter invariant: don’t allow requesting/waitlisting your own title.
+  const ownsCopy = await env.DB.prepare(
+    "SELECT 1 FROM library_copies WHERE title_id=? AND owner_member_id=? AND withdrawn_at IS NULL LIMIT 1"
+  )
+    .bind(titleId, member.id)
+    .first();
+  if (ownsCopy) {
+    return json({ error: "You cannot request a title you are sharing." }, 409);
+  }
+
+  const requestId = id();
+
+  // Helper: create a waitlisted request (single exit path).
+  const createWaitlisted = async () => {
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO library_requests (id,title_id,copy_id,requester_member_id,status) VALUES (?,?,?,?,?)"
+        ).bind(requestId, titleId, null, member.id, "waitlisted"),
+        env.DB.prepare(
+          "INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) VALUES ('library_request',?,'created',?,?)"
+        ).bind(requestId, member.id, JSON.stringify({ titleId, status: "waitlisted", copyId: null }))
+      ]);
+    } catch (error) {
+      const duplicate = await env.DB.prepare(
+        "SELECT 1 FROM library_requests WHERE title_id=? AND requester_member_id=? AND status IN ('pending','waitlisted','approved') LIMIT 1"
+      ).bind(titleId, member.id).first();
+      if (duplicate) return json({ error: "You already have an active request for this title." }, 409);
+      console.error("Unable to create library waitlist request", error);
+      return json({ error: "Unable to join the waiting list. Please try again." }, 503);
+    }
+
+    return json({
+      ok: true,
+      message: "All copies are in use. You have joined the waiting list.",
+      notifyOwnerUrl: null
+    });
+  };
+
+  // If anyone is already waiting, force waitlist (no bypass).
+  const waitingExists = await env.DB.prepare(
+    "SELECT 1 FROM library_requests WHERE title_id=? AND status='waitlisted' LIMIT 1"
+  )
+    .bind(titleId)
+    .first();
+  if (waitingExists) return createWaitlisted();
+
+  // Try to reserve an available copy (no transaction; conditional update).
+  // Keep attempts bounded to protect free-tier usage.
+  const MAX_RESERVE_ATTEMPTS = 3;
+
+  let reservedCopy: { id: string; owner_name: string; owner_mobile: string } | null = null;
+
+  for (let attempt = 0; attempt < MAX_RESERVE_ATTEMPTS; attempt++) {
+    const candidate = await env.DB.prepare(
+      `SELECT c.id, m.display_name owner_name, m.mobile_number owner_mobile
+         FROM library_copies c
+         JOIN library_members m ON m.id=c.owner_member_id
+        WHERE c.title_id=?
+          AND c.status='available'
+          AND c.withdrawn_at IS NULL
+          AND c.owner_member_id!=?
+          AND m.status='active'
+        ORDER BY c.created_at
+        LIMIT 1`
+    )
+      .bind(titleId, member.id)
+      .first<{ id: string; owner_name: string; owner_mobile: string }>();
+
+    if (!candidate) break;
+
+    const reserveResult = await env.DB.prepare(
+      "UPDATE library_copies SET status='reserved',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='available' AND withdrawn_at IS NULL"
+    )
+      .bind(candidate.id)
+      .run();
+
+    if (reserveResult.meta.changes) {
+      reservedCopy = candidate;
+      break;
+    }
+  }
+
+  // No copy could be reserved => waitlist.
+  if (!reservedCopy) return createWaitlisted();
+
+  const releaseReservedCopy = async () => {
+    // D1 rolls back the request/audit batch together. This compensates for a
+    // failed insert while avoiding a release if another workflow now owns it.
+    await env.DB.prepare(
+      `UPDATE library_copies
+          SET status='available',updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+          AND status='reserved'
+          AND NOT EXISTS (
+            SELECT 1 FROM library_requests r
+             WHERE r.copy_id=library_copies.id
+               AND r.status IN ('pending','approved','fulfilled')
+          )`
+    )
+      .bind(reservedCopy!.id)
+      .run();
+  };
+
+  // Create the pending request only after the copy is reserved.
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO library_requests (id,title_id,copy_id,requester_member_id,status) VALUES (?,?,?,?,?)"
+      ).bind(requestId, titleId, reservedCopy.id, member.id, "pending"),
+      env.DB.prepare(
+        "INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) VALUES ('library_request',?,'created',?,?)"
+      ).bind(requestId, member.id, JSON.stringify({ titleId, status: "pending", copyId: reservedCopy.id }))
+    ]);
+  } catch (error) {
+    // Compensate: if request insert failed (race/constraint), release the reserved copy.
+    await releaseReservedCopy();
+
+    // Don’t leak internals; this is typically a race.
+    return json({ error: "Unable to record this request. Please try again." }, 409);
+  }
+
+  const notifyOwnerUrl = whatsappLink(
+    reservedCopy.owner_mobile,
+    `Hi ${reservedCopy.owner_name}, I am ${member.display_name} from ${member.block_no}-${member.flat_no}. I have requested "${title.title}" through Skyrena Community Library. Please review it under My Library > Incoming.`
+  );
+
+  return json({ ok: true, message: "Book request recorded.", notifyOwnerUrl });
 }
+
 
 export async function expireLibraryReservations(env: LibraryEnv) {
   const expired = await env.DB.prepare(`SELECT id,title_id,copy_id FROM library_requests
@@ -773,6 +953,48 @@ export async function expireLibraryReservations(env: LibraryEnv) {
     released++;
   }
   return released;
+}
+
+export async function releaseOrphanReservedCopies(env: LibraryEnv) {
+  // The age check is repeated inside the atomic UPDATE. A freshly re-reserved
+  // copy therefore cannot be released from a stale cleanup candidate list.
+  const released = await env.DB.prepare(`UPDATE library_copies
+    SET status='available',updated_at=CURRENT_TIMESTAMP
+    WHERE id IN (
+      SELECT c.id FROM library_copies c
+      WHERE c.status='reserved'
+        AND c.withdrawn_at IS NULL
+        AND c.updated_at<=datetime('now','-10 minutes')
+        AND NOT EXISTS (
+          SELECT 1 FROM library_requests r
+          WHERE r.copy_id=c.id AND r.status IN ('pending','approved')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM library_loans l
+          WHERE l.copy_id=c.id AND l.status='active'
+        )
+      ORDER BY c.updated_at
+      LIMIT 50
+    )
+      AND status='reserved'
+      AND withdrawn_at IS NULL
+      AND updated_at<=datetime('now','-10 minutes')
+      AND NOT EXISTS (
+        SELECT 1 FROM library_requests r
+        WHERE r.copy_id=library_copies.id AND r.status IN ('pending','approved')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM library_loans l
+        WHERE l.copy_id=library_copies.id AND l.status='active'
+      )
+    RETURNING id`).all<{ id: string }>();
+
+  if (released.results.length) {
+    await env.DB.batch(released.results.map(row => env.DB.prepare(
+      "INSERT INTO audit_log (entity_type,entity_id,action,actor) VALUES ('library_copy',?,'orphan_reservation_released','scheduled-job')"
+    ).bind(row.id)));
+  }
+  return released.results.length;
 }
 
 async function requestAction(request: Request, env: LibraryEnv, requestId: string) {
@@ -837,12 +1059,27 @@ async function requestAction(request: Request, env: LibraryEnv, requestId: strin
   if (action === "handover" && isOwner && row.status === "approved" && row.copy_status === "reserved") {
     const due = new Date(Date.now() + LOAN_DAYS * 86400000).toISOString().slice(0, 19).replace("T", " ");
     const loanId = id();
-    await env.DB.batch([
-      env.DB.prepare("INSERT INTO library_loans (id,copy_id,request_id,owner_member_id,borrower_member_id,due_at) VALUES (?,?,?,?,?,?)").bind(loanId, row.copy_id, requestId, member.id, row.requester_member_id, due),
-      env.DB.prepare("UPDATE library_requests SET status='fulfilled',reservation_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(requestId),
-      env.DB.prepare("UPDATE library_copies SET status='borrowed',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(row.copy_id),
-      env.DB.prepare("INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) VALUES ('library_loan',?,'borrowed',?,?)").bind(loanId, member.id, JSON.stringify({ dueAt: due, requestId }))
+    const handover = await env.DB.batch([
+      env.DB.prepare(`INSERT INTO library_loans (id,copy_id,request_id,owner_member_id,borrower_member_id,due_at)
+        SELECT ?,?,?,?,?,?
+        WHERE EXISTS (SELECT 1 FROM library_members WHERE id=? AND status='active')
+          AND (SELECT COUNT(*) FROM library_loans WHERE borrower_member_id=? AND status='active')<2
+          AND EXISTS (
+            SELECT 1 FROM library_requests r JOIN library_copies c ON c.id=r.copy_id
+            WHERE r.id=? AND r.status='approved' AND c.id=? AND c.status='reserved' AND c.owner_member_id=?
+          )`).bind(loanId, row.copy_id, requestId, member.id, row.requester_member_id, due, row.requester_member_id, row.requester_member_id, requestId, row.copy_id, member.id),
+      env.DB.prepare("UPDATE library_requests SET status='fulfilled',reservation_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='approved' AND EXISTS (SELECT 1 FROM library_loans WHERE id=?)").bind(requestId, loanId),
+      env.DB.prepare("UPDATE library_copies SET status='borrowed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='reserved' AND EXISTS (SELECT 1 FROM library_loans WHERE id=?)").bind(row.copy_id, loanId),
+      env.DB.prepare("INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) SELECT 'library_loan',?,'borrowed',?,? WHERE EXISTS (SELECT 1 FROM library_loans WHERE id=?)").bind(loanId, member.id, JSON.stringify({ dueAt: due, requestId }), loanId)
     ]);
+    if (!handover[0].meta.changes) {
+      const borrower = await env.DB.prepare(`SELECT m.status,
+        (SELECT COUNT(*) FROM library_loans WHERE borrower_member_id=m.id AND status='active') active_loans
+        FROM library_members m WHERE m.id=?`).bind(row.requester_member_id).first<{ status: string; active_loans: number }>();
+      if (!borrower || borrower.status !== "active") return redirect(request, "/library/dashboard?error=This+reader+account+is+not+active.#incoming");
+      if (Number(borrower.active_loans || 0) >= 2) return redirect(request, "/library/dashboard?error=This+reader+already+has+two+active+loans.+Please+ask+them+to+return+a+book+first.#incoming");
+      return redirect(request, "/library/dashboard?error=This+handover+is+no+longer+available.#incoming");
+    }
     return redirect(request, `/library/dashboard?success=Handover+confirmed.+The+book+is+due+in+${LOAN_DAYS}+days.#shelf`);
   }
   return redirect(request, "/library/dashboard?error=That+action+is+not+available.");
@@ -1019,26 +1256,64 @@ async function adminReminderAction(request: Request, env: LibraryEnv, loanId: st
 export async function handleLibrary(request: Request, env: LibraryEnv): Promise<Response | null> {
   const url = new URL(request.url), path = url.pathname.replace(/\/+$/, "") || "/";
   if (!(path === "/library" || path.startsWith("/library/") || path.startsWith("/api/library/"))) return null;
+
   if (request.method === "GET" && path === "/library") return cataloguePage(request, env);
   if (request.method === "GET" && path === "/library/join") return joinPage(request, env);
-  if (request.method === "POST" && path === "/library/join") return join(request, env);
+
+  if (request.method === "POST" && path === "/library/join") {
+    if (!isSameOriginPost(request)) return redirect(request, "/library/join?error=Invalid+request.+Please+try+again.");
+    return join(request, env);
+  }
+
   if (request.method === "GET" && path === "/library/login") return loginPage(request, env);
-  if (request.method === "POST" && path === "/library/login") return login(request, env);
+
+  if (request.method === "POST" && path === "/library/login") {
+    if (!isSameOriginPost(request)) return redirect(request, "/library/login?error=Invalid+request.+Please+try+again.");
+    return login(request, env);
+  }
+
   if (request.method === "GET" && path === "/library/logout") return logout(request);
   if (request.method === "GET" && path === "/library/dashboard") return dashboardPage(request, env);
   if (request.method === "GET" && path === "/library/admin") return adminPage(request, env);
+
   const coverMatch = path.match(/^\/library\/covers\/([^/]+)$/);
   if (request.method === "GET" && coverMatch) return coverImage(env, decodeURIComponent(coverMatch[1]));
+
   if (request.method === "GET" && path === "/api/library/metadata") return metadataSearch(request);
-  if (request.method === "POST" && path === "/api/library/books") return addBooks(request, env);
-  if (request.method === "POST" && path === "/api/library/requests") return createRequest(request, env);
+
+  if (request.method === "POST" && path === "/api/library/books") {
+    if (!isSameOriginPost(request)) return json({ error: "Invalid request origin." }, 403);
+    return addBooks(request, env);
+  }
+
+  if (request.method === "POST" && path === "/api/library/requests") {
+    if (!isSameOriginPost(request)) return json({ error: "Invalid request origin." }, 403);
+    return createRequest(request, env);
+  }
+
   const requestMatch = path.match(/^\/api\/library\/requests\/([^/]+)\/action$/);
-  if (request.method === "POST" && requestMatch) return requestAction(request, env, decodeURIComponent(requestMatch[1]));
+  if (request.method === "POST" && requestMatch) {
+    if (!isSameOriginPost(request)) return redirect(request, "/library/dashboard?error=Invalid+request.+Please+try+again.");
+    return requestAction(request, env, decodeURIComponent(requestMatch[1]));
+  }
+
   const copyMatch = path.match(/^\/api\/library\/copies\/([^/]+)\/action$/);
-  if (request.method === "POST" && copyMatch) return copyAction(request, env, decodeURIComponent(copyMatch[1]));
+  if (request.method === "POST" && copyMatch) {
+    if (!isSameOriginPost(request)) return redirect(request, "/library/dashboard?error=Invalid+request.+Please+try+again.");
+    return copyAction(request, env, decodeURIComponent(copyMatch[1]));
+  }
+
   const memberMatch = path.match(/^\/api\/library\/admin\/members\/([^/]+)$/);
-  if (request.method === "POST" && memberMatch) return adminMemberAction(request, env, decodeURIComponent(memberMatch[1]));
+  if (request.method === "POST" && memberMatch) {
+    if (!isSameOriginPost(request)) return new Response("Invalid request origin.", { status: 403 });
+    return adminMemberAction(request, env, decodeURIComponent(memberMatch[1]));
+  }
+
   const reminderMatch = path.match(/^\/api\/library\/admin\/loans\/([^/]+)\/reminder$/);
-  if (request.method === "POST" && reminderMatch) return adminReminderAction(request, env, decodeURIComponent(reminderMatch[1]));
+  if (request.method === "POST" && reminderMatch) {
+    if (!isSameOriginPost(request)) return new Response("Invalid request origin.", { status: 403 });
+    return adminReminderAction(request, env, decodeURIComponent(reminderMatch[1]));
+  }
+
   return new Response("Not found", { status: 404 });
 }

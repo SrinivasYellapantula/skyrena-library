@@ -1,4 +1,4 @@
-import { expireLibraryReservations, handleLibrary } from "./library";
+import { expireLibraryReservations, handleLibrary, releaseOrphanReservedCopies } from "./library";
 
 interface Env {
   DB: D1Database;
@@ -23,8 +23,11 @@ export default {
     }
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(expireLibraryReservations(env).then(released => {
-      if (released) console.log(`Released ${released} expired library reservation(s).`);
-    }));
+    ctx.waitUntil((async () => {
+      const expired = await expireLibraryReservations(env);
+      if (expired) console.log(`Released ${expired} expired library reservation(s).`);
+      const orphans = await releaseOrphanReservedCopies(env);
+      if (orphans) console.log(`Released ${orphans} orphan reserved copy/copies.`);
+    })());
   }
 };
