@@ -1059,29 +1059,56 @@ async function requestAction(request: Request, env: LibraryEnv, requestId: strin
   if (action === "handover" && isOwner && row.status === "approved" && row.copy_status === "reserved") {
     const due = new Date(Date.now() + LOAN_DAYS * 86400000).toISOString().slice(0, 19).replace("T", " ");
     const loanId = id();
-    const handover = await env.DB.batch([
-      env.DB.prepare(`INSERT INTO library_loans (id,copy_id,request_id,owner_member_id,borrower_member_id,due_at)
-        SELECT ?,?,?,?,?,?
-        WHERE EXISTS (SELECT 1 FROM library_members WHERE id=? AND status='active')
-          AND (SELECT COUNT(*) FROM library_loans WHERE borrower_member_id=? AND status='active')<2
-          AND EXISTS (
-            SELECT 1 FROM library_requests r JOIN library_copies c ON c.id=r.copy_id
-            WHERE r.id=? AND r.status='approved' AND c.id=? AND c.status='reserved' AND c.owner_member_id=?
-          )`).bind(loanId, row.copy_id, requestId, member.id, row.requester_member_id, due, row.requester_member_id, row.requester_member_id, requestId, row.copy_id, member.id),
-      env.DB.prepare("UPDATE library_requests SET status='fulfilled',reservation_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='approved' AND EXISTS (SELECT 1 FROM library_loans WHERE id=?)").bind(requestId, loanId),
-      env.DB.prepare("UPDATE library_copies SET status='borrowed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='reserved' AND EXISTS (SELECT 1 FROM library_loans WHERE id=?)").bind(row.copy_id, loanId),
-      env.DB.prepare("INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) SELECT 'library_loan',?,'borrowed',?,? WHERE EXISTS (SELECT 1 FROM library_loans WHERE id=?)").bind(loanId, member.id, JSON.stringify({ dueAt: due, requestId }), loanId)
-    ]);
-    if (!handover[0].meta.changes) {
-      const borrower = await env.DB.prepare(`SELECT m.status,
-        (SELECT COUNT(*) FROM library_loans WHERE borrower_member_id=m.id AND status='active') active_loans
-        FROM library_members m WHERE m.id=?`).bind(row.requester_member_id).first<{ status: string; active_loans: number }>();
-      if (!borrower || borrower.status !== "active") return redirect(request, "/library/dashboard?error=This+reader+account+is+not+active.#incoming");
-      if (Number(borrower.active_loans || 0) >= 2) return redirect(request, "/library/dashboard?error=This+reader+already+has+two+active+loans.+Please+ask+them+to+return+a+book+first.#incoming");
-      return redirect(request, "/library/dashboard?error=This+handover+is+no+longer+available.#incoming");
+
+    try {
+      const handover = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO library_loans (id,copy_id,request_id,owner_member_id,borrower_member_id,due_at)
+          SELECT ?,?,?,?,?,?
+          WHERE EXISTS (SELECT 1 FROM library_members WHERE id=? AND status='active')
+            AND EXISTS (
+              SELECT 1 FROM library_requests r
+              JOIN library_copies c ON c.id=r.copy_id
+              WHERE r.id=?
+                AND r.status='approved'
+                AND c.id=?
+                AND c.status='reserved'
+                AND c.withdrawn_at IS NULL
+                AND c.owner_member_id=?
+            )`).bind(loanId, row.copy_id, requestId, member.id, row.requester_member_id, due, row.requester_member_id, requestId, row.copy_id, member.id),
+        env.DB.prepare(
+          "UPDATE library_requests SET status='fulfilled',reservation_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='approved' AND EXISTS (SELECT 1 FROM library_loans WHERE id=?)"
+        ).bind(requestId, loanId),
+        env.DB.prepare(
+          "UPDATE library_copies SET status='borrowed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='reserved' AND EXISTS (SELECT 1 FROM library_loans WHERE id=?)"
+        ).bind(row.copy_id, loanId),
+        env.DB.prepare(
+          "INSERT INTO audit_log (entity_type,entity_id,action,actor,after_json) SELECT 'library_loan',?,'borrowed',?,? WHERE EXISTS (SELECT 1 FROM library_loans WHERE id=?)"
+        ).bind(loanId, member.id, JSON.stringify({ dueAt: due, requestId }), loanId)
+      ]);
+      if (!handover[0].meta.changes) {
+        const borrower = await env.DB.prepare("SELECT status FROM library_members WHERE id=?").bind(row.requester_member_id).first<{ status: string }>();
+        if (!borrower || borrower.status !== "active") {
+          return redirect(request, "/library/dashboard?error=This+reader+account+is+not+active.#incoming");
+        }
+        return redirect(request, "/library/dashboard?error=This+handover+is+no+longer+available.#incoming");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (message.includes("MAX_ACTIVE_LOANS_EXCEEDED")) {
+        return redirect(
+          request,
+          "/library/dashboard?error=This+reader+already+has+two+active+loans.+Please+ask+them+to+return+a+book+first.#incoming"
+        );
+      }
+
+      console.error("Loan handover failed", error);
+      return redirect(request, "/library/dashboard?error=Unable+to+confirm+handover.+Please+try+again.#incoming");
     }
+
     return redirect(request, `/library/dashboard?success=Handover+confirmed.+The+book+is+due+in+${LOAN_DAYS}+days.#shelf`);
   }
+
   return redirect(request, "/library/dashboard?error=That+action+is+not+available.");
 }
 
